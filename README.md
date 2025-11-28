@@ -3,6 +3,6 @@ These are the scripts I wrote in conducting analysis for the DNMT1i manuscript. 
 
 ATACseq_220215: 4 conditions NT & gRNF4 both +/- DNMT1i conducted in triplicate. Processing and initial analysis was performed by NGB. These scripts for additional downstream analysis I performed in preparation and revision of the manuscript.
 
-ChIPseq_AGRF2105: original DNMT1 chip in the 4 conditions listed above. Processing and initial analysis was conducted by EYL. These scripts are from the additional analysis I performed.
+ChIPseq_AGRF2105: Original DNMT1 chip in the 4 conditions listed above, n=1. Processing and initial analysis was conducted by EYL. These scripts are from the additional analysis I performed.
 
-ChIPseq_240918:
+ChIPseq_250217: This is a chip for DNMT1 as follows, WT & CXXC both +/- drug n=2 and WT-gNT, WT-gRNF4, KR-gNT, KR-gRNF4 all +/- drug n=1. For this experiment I did all processing and analysis end-to-end with the included scripts.
