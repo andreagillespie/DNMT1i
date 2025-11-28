@@ -1,0 +1,190 @@
+---
+title: "ATACseq_analysis_AG"
+author: "Andrea"
+date: '2022-06-20'
+output: html_document
+---
+
+# get intersection of ATAC peaks over ERV promoters and MRGs
+```{r}
+library(data.table) 
+library(edgeR)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/"
+data.dir <- file.path(project.dir, "data")
+
+erv <- fread(file.path(data.dir, "ERV_promoters.txt"))
+
+# use code from processing of table into dge object from Nairara's analysis (Diff_accessibility_analysis_new_data.Rmd)
+seqdata = read.table("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Peak_calling/counts_subread_ATAC_enerich_a_MAPQ.txt" , stringsAsFactors = F, header = T)
+names_2 <- gsub("X.dawson_genomics.Projects.DNMTi.ATACseq.220215_A01524_0015_BHTTYMDRXY.Processed_files_downsampled.", "", names(seqdata))
+names_3 <- gsub("_merged_rmdup_sort_nMTnU_MAPQ.bam", "", names_2)
+colnames(seqdata) <- names_3
+sampleinfo <- data.frame(sampleID=names_3[7:18], group=c("gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm","gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm","gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm"), line=c(rep("R1",4),rep("R2",4),rep("R3",4)))
+countdata <- seqdata[,c(7:18)]
+rownames(countdata) <- paste0(seqdata$Chr, ":", seqdata$Start, "_",seqdata$End)
+genes <- seqdata[,c(1:4)]
+y <- DGEList(countdata, samples = sampleinfo[, c("sampleID", "group")], group = as.factor(sampleinfo$group), genes = genes)
+y <- y[,y$samples$sampleID!="R1.gNT.0nM_S4",]
+sampleinfo <- sampleinfo[sampleinfo$sampleID!="R1.gNT.0nM_S4",]
+
+# now use TMM norm for dge object
+y <- calcNormFactors(y, method = "TMM")
+
+# multiply read by norm factors, then get mean across replicates and make into shinyCircos compatible table
+y.norm <- y$counts%*%diag(y$samples$norm.factors)
+colnames(y.norm) <- colnames(y$counts)
+n0.merge <- rowMeans(y.norm[ , c(4, 8)])
+n100.merge <- rowMeans(y.norm[ , c(1, 5, 9)])
+r0.merge <- rowMeans(y.norm[ , c(2, 6, 10)])
+r100.merge <- rowMeans(y.norm[ , c(3, 7, 11)])
+
+# make new df of rep means
+m.counts <- data.frame(cbind(y$genes[,2:4], n0.merge, n100.merge, r0.merge, r100.merge))
+
+# loop through brian's erv table and total ATAC peaks in each sample for region & promoter
+erv.atac <- NULL
+for(i in 1:nrow(erv)){
+  reg <- subset(m.counts, m.counts$Chr == erv[i]$region.chr & m.counts$Start >= erv[i]$region.start & m.counts$End <= erv[i]$region.end)
+  reg.sums <- cbind(erv[i][,1:3], t(colSums(reg[,4:7])))
+  prom <- subset(m.counts, m.counts$Chr == erv[i]$region.chr & m.counts$Start >= (erv[i]$promoter.start-1000) & m.counts$End <= (erv[i]$promoter.end+1000))
+  prom.sums <- cbind(erv[i][,4:5], t(colSums(prom[,4:7])))
+  erv.atac <- rbind(erv.atac, cbind(reg.sums, prom.sums))
+}
+
+# above erv.atac has a lot of 0s for ATAC peaks even though ATAC reads are present, so get intersect with bam as exploratory analysis 
+#start by making bed files of erv table
+reg.bed <- erv[, 1:3]
+write.table(
+  reg.bed,
+  file.path(data.dir, "intergenic_top15_regions.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+prom.bed <- erv[, c(1, 4:5)]
+# for promoter go +/- 500
+prom.bed$promoter.start <- prom.bed$promoter.start - 500
+prom.bed$promoter.end <- prom.bed$promoter.end + 500
+write.table(
+  prom.bed,
+  file.path(data.dir, "intergenic_top15_promoter_500bp.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# now do bedtools intersect of each bed with each merged ATAC bam
+```{bash}
+# sort bed files first 
+sort -k1,1 -k2,2n intergenic_top15_promoter_500bp.bed > intergenic_top15_promoter_500bp.sorted.bed
+sort -k1,1 -k2,2n intergenic_top15_regions.bed > intergenic_top15_regions.sorted.bed
+
+# sort merged bams and intersect with reg and prom beds
+for bam in Processed_files_downsampled/*_merged_by_group_rmdup_sort_nMTnU_MAPQ.bam
+do
+sbatch scripts/intergenic_top15_counts.sbatch $bam
+done
+```
+
+# make a bed file of all ATAC peaks table
+```{r}
+write.table(
+  seqdata[, 2:4],
+  file.path(data.dir, "all_ATAC_peaks.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# compile bam counts into a single table
+```{r}
+n0.region <- fread(file.path(data.dir, "gNT-0nM_intergenic_top15_regions_ATAC_counts.bed"))
+colnames(n0.region) <- c("chr", "region.start", "region.end", "n0.region.ATAC.reads")
+r0.region <- fread(file.path(data.dir, "gRNF4-0nM_intergenic_top15_regions_ATAC_counts.bed"))
+all.reads <- merge(n0.region, r0.region, by.x = c("chr", "region.start", "region.end"), by.y = c("V1", "V2", "V3"))
+n100.region <- fread(file.path(data.dir, "gNT-100nM_intergenic_top15_regions_ATAC_counts.bed"))
+all.reads <- merge(all.reads, n100.region, by.x = c("chr", "region.start", "region.end"), by.y = c("V1", "V2", "V3"))
+r100.region <- fread(file.path(data.dir, "gRNF4-100nM_intergenic_top15_regions_ATAC_counts.bed"))
+all.reads <- merge(all.reads, r100.region, by.x = c("chr", "region.start", "region.end"), by.y = c("V1", "V2", "V3"))
+colnames(all.reads)[5:7] <- c("r0.region.ATAC.reads", "n100.region.ATAC.reads", "r100.region.ATAC.reads")
+
+n0.prom <- fread(file.path(data.dir, "gNT-0nM_intergenic_top15_promoter500_ATAC_counts.bed"))
+colnames(n0.prom) <- c("chr", "prom.start", "prom.end", "n0.prom.ATAC.reads")
+all.reads <- cbind(all.reads, n0.prom[, 2:4])
+r0.prom <- fread(file.path(data.dir, "gRNF4-0nM_intergenic_top15_promoter500_ATAC_counts.bed"))
+all.reads <- merge(all.reads, r0.prom, by.x = c("chr", "prom.start", "prom.end"), by.y = c("V1", "V2", "V3"))
+n100.prom <- fread(file.path(data.dir, "gNT-100nM_intergenic_top15_promoter500_ATAC_counts.bed"))
+all.reads <- merge(all.reads, n100.prom, by.x = c("chr", "prom.start", "prom.end"), by.y = c("V1", "V2", "V3"))
+r100.prom <- fread(file.path(data.dir, "gRNF4-100nM_intergenic_top15_promoter500_ATAC_counts.bed"))
+all.reads <- merge(all.reads, r100.prom, by.x = c("chr", "prom.start", "prom.end"), by.y = c("V1", "V2", "V3"))
+colnames(all.reads)[11:13] <- c("r0.prom.ATAC.reads", "n100.prom.ATAC.reads", "r100.prom.ATAC.reads")
+all.reads <- all.reads[, c(1, 4:9, 2:3, 10:13)]
+
+write.table(
+  all.reads,
+  file.path(data.dir, "ATACseq_downsampled_reads_int_regions.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = TRUE
+)
+```
+
+# make heatmap at dnmt1 peaks with RPGC norm files
+```{bash}
+sbatch scripts/DTMat_CGI_DNMT1_ordered.sbatch
+```
+
+# make heatmap of LTRs sorted by accessibility
+```{r}
+# first make bed file of LTRs only from repeatmasker
+rm.bed <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/Hyper_editing/REDItools/bed_files/Hg38_RepeatMasker.bed")
+
+ltr.only <- subset(rm.bed, V6 == "LTR" | V6 == "LTR?")
+# remove "chr" and order for use with deeptools
+ltr.chr <- gsub("chr", "", ltr.only$V1)
+ltr.bed <- cbind(gsub("chr", "", ltr.only$V1), ltr.only[, c(2:3, 5, 7, 4, 6)])
+
+write.table(
+  ltr.bed,
+  file.path(project.dir, "bed_files/RepeatMasker_LTRonly.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make heatmap of accessibility over LTRs with RNAseq overlap
+```{bash}
+sbatch scripts/DT_heatmap_LTRoverlap_3000_3000_ATACseq.sbatch
+
+# with all sig overlap as well
+sbatch scripts/DT_heatmap_LTRoverlap_allP05_3000_3000_ATACseq.sbatch
+
+# now with newly defined "true tinats"
+sbatch scripts/DT_heatmap_TINAT_DEfiltered_3000_3000_ATACseq.sbatch
+
+# now with Brians curated list
+sbatch scripts/DT_heatmap_realTINAT_3000_3000_ATACseq.sbatch
+
+# new list of 17 mintRNAs
+sbatch scripts/DT_heatmap_mintRNA_3000_3000_ATACseq.sbatch
+sbatch scripts/DT_heatmap_mintRNA_2000_2000_ATACseq.sbatch
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_ATACseq_analysis_220215.txt"))
+)
+```
