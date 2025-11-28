@@ -1,0 +1,197 @@
+---
+title: "ChIPseq_250627"
+author: "Andrea"
+date: "2025/06/30"
+output: html_document
+---
+
+fastq location: /pipeline/Runs/NextSeq/250627_VH01624_315_AACWK7KHV/ProjectFolders/Project_Jesse-Balic/*
+project directory: /dawson_genomics/Projects/DNMTi/ChIPseq/250627/
+
+# set up project dir and process (fastqc, trim, align, tdfs)
+```{bash}
+mkdir alignment
+mkdir fastqc
+mkdir fastq_screen
+mkdir trimmed_fastqs
+mkdir logs
+mkdir scripts
+mkdir tdfs
+
+for fq in /pipeline/Runs/NextSeq/250627_VH01624_315_AACWK7KHV/ProjectFolders/Project_Jesse-Balic/*/*_R1_001.fastq.gz
+do
+sbatch scripts/alignHg38.sbatch $fq
+done
+
+# run multiqc to collate reports
+module load py-multiqc/1.15-gcc-13.2.0
+multiqc .
+```
+
+# peak calling (both narrow and broad) include bedgraph output for Spark plots and diff peaks if needed
+```{bash}
+mkdir -p macs/narrowpeaks
+mkdir -p macs/broadpeaks
+
+for bam in alignment/[NRU]*DMSO*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/Input-WT-1-DMSO_S102.sort.rmdup.bam
+done
+
+for bam in alignment/[NRU]*DNMT1i*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/Input-WT-1-DNMT1i_S103.sort.rmdup.bam
+done
+
+for bam in alignment/MV411*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/Input-WT-1-DMSO_S102.sort.rmdup.bam
+done
+```
+
+# make bigwigs for DT plots
+```{bash}
+mkdir bigwigs
+
+for bam in alignment/*sort.rmdup.bam
+do
+sbatch scripts/DeeptoolsBamCov.sbatch $bam
+done
+```
+
+# make DNMT CGI peaks as in manuscript
+```{bash}
+mkdir results
+mkdir plots 
+
+sbatch scripts/DTMatrix_DNMT_CGI_peaks_refpoint_GFP_Set1.sbatch
+sbatch scripts/DTMatrix_DNMT_CGI_peaks_refpoint_GFP_Set2.sbatch
+sbatch scripts/DTMatrix_DNMT_CGI_peaks_refpoint_GFP_UHRF1KO.sbatch
+```
+
+# make heatmaps over DMSO and DNMTi peaks from last chip
+```{bash}
+sbatch scripts/DTMatrix_WT250217_peaks_refpoint_GFP_Set1.sbatch
+sbatch scripts/DTMatrix_WT250217_peaks_refpoint_GFP_Set2.sbatch
+sbatch scripts/DTMatrix_WT250217_peaks_refpoint_GFP_UHRF1KO.sbatch
+```
+
+# merge replicates by mean for reps in RC and RFTS KO DMSO cond treat & ctrl
+```{bash}
+dname=macs/broadpeaks
+
+sbatch scripts/cmbreps.sbatch ${dname}/RC-DMSO_merged_treat_pileup.bdg \
+  ${dname}/RC-1-DMSO-GFP-ChIP_S107_treat_pileup.bdg \
+  ${dname}/RC-2-DMSO-GFP-ChIP_S108_treat_pileup.bdg
+
+sbatch scripts/cmbreps.sbatch ${dname}/RFTS-DMSO_merged_treat_pileup.bdg \
+  ${dname}/RFTS-1-DMSO-GFP-ChIP_S105_treat_pileup.bdg \
+  ${dname}/RFTS-2-DMSO-GFP-ChIP_S109_treat_pileup.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/RC-DMSO_merged_control_lambda.bdg \
+  ${dname}/RC-1-DMSO-GFP-ChIP_S107_control_lambda.bdg \
+  ${dname}/RC-2-DMSO-GFP-ChIP_S108_control_lambda.bdg
+
+sbatch scripts/cmbreps.sbatch ${dname}/RFTS-DMSO_merged_control_lambda.bdg \
+  ${dname}/RFTS-1-DMSO-GFP-ChIP_S105_control_lambda.bdg \
+  ${dname}/RFTS-2-DMSO-GFP-ChIP_S109_control_lambda.bdg
+```
+
+# get diff peaks for ∆RFTS, ∆RC vs ctrl
+```{bash}
+mkdir bdgdiff
+dname=macs/broadpeaks
+
+sbatch scripts/bdgdiff.sbatch ${dname}/RC-DMSO_merged_treat_pileup.bdg \
+  ${dname}/RC-DMSO_merged_control_lambda.bdg \
+  ${dname}/WT-1-DMSO-GFP-ChIP_S101_treat_pileup.bdg \
+  ${dname}/WT-1-DMSO-GFP-ChIP_S101_control_lambda.bdg \
+  DMSO-RCvsWT
+
+sbatch scripts/bdgdiff.sbatch ${dname}/RFTS-DMSO_merged_treat_pileup.bdg \
+  ${dname}/RFTS-DMSO_merged_control_lambda.bdg \
+  ${dname}/WT-1-DMSO-GFP-ChIP_S101_treat_pileup.bdg \
+  ${dname}/WT-1-DMSO-GFP-ChIP_S101_control_lambda.bdg \
+  DMSO-RFTSvsWT
+```
+
+# make cmb rep bigwigs for plotting
+```{bash}
+sbatch scripts/DeeptoolsBWcomp.sbatch \
+  RC-1-DMSO-GFP-ChIP_S107.RPGC.bw \
+  RC-2-DMSO-GFP-ChIP_S108.RPGC.bw \
+  RC-DMSO
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch \
+  RFTS-1-DMSO-GFP-ChIP_S105.RPGC.bw \
+  RFTS-2-DMSO-GFP-ChIP_S109.RPGC.bw \
+  RFTS-DMSO
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch \
+  RFTS-1-DNMT1i-GFP-ChIP_S106.RPGC.bw \
+  RFTS-2-DNMT1i-GFP-ChIP_S110.RPGC.bw \
+  RFTS-DNMTi
+```
+
+# make heatmaps of merged bws over 3 sets of diffpeaks
+```{bash}
+sbatch scripts/DTMatrix_merged_CXXC_RFTS_RC_diffpeaks_refpoint.sbatch
+```
+
+# init R env
+```{r}
+library(data.table)
+library(Rsubread)
+library(ggplot2)
+library(ggpubr)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/ChIPseq/250217"
+```
+
+# make saf and get counts over CGI DNMT1 peaks as in fig 1 to make scatterplots of inputs
+```{r}
+dnmt.cgi.bed <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/DNMT1_CGI.bed")
+dnmt.cgi.saf <- data.frame(
+  "GeneID" = paste0("peak_", 1:nrow(dnmt.cgi.bed)), 
+  "Chr" = dnmt.cgi.bed$V1, 
+  "Start" = dnmt.cgi.bed$V2, 
+  "End" = dnmt.cgi.bed$V3, 
+  "Strand" = "*"
+)
+
+input.bams <- list.files("alignment", pattern = "INPUT.*sort.rmdup.bam$", full.names = TRUE)
+
+dnmt.cgi.counts <- featureCounts(
+  input.bams,
+  annot.ext = dnmt.cgi.saf
+)
+colnames(dnmt.cgi.counts$counts) <- gsub(".sort.rmdup.bam", "", colnames(dnmt.cgi.counts$counts))
+dnmt.cgi.df <- as.data.frame(dnmt.cgi.counts$counts)
+
+# make scatterplot of DNMT1 v input for each condition
+ct <- cor.test(dnmt.cgi.df$`INPUT-1_S41`, dnmt.cgi.df$`INPUT-2_S42`)
+pdf("plots/Scatterplot_INPUT1vINPUT2.pdf")
+plot(
+  dnmt.cgi.df$`INPUT-1_S41`,
+  dnmt.cgi.df$`INPUT-2_S42`, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 550),
+  ylim = c(0, 550),
+  xlab = "Input-1_S41",
+  ylab = "Input-2-S42"
+  )
+abline(a = 0, b = 1, col = "red")
+text(50, 450, paste0("R = ", round(ct$estimate, 4)))
+text(50, 425, paste0("p <= ", ct$p.value))
+dev.off()
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_ChIPseq_250627.txt"))
+)
+```
