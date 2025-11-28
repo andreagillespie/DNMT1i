@@ -10,3 +10,5 @@ ChIPseq_250217: This is another chip for DNMT1 as follows, WT & CXXC both +/- dr
 ChIPseq_250627: These are chips of GFP-tagged DNMT1 in WT, NTC, UHRF1-KO, ∆RFTS, and ∆RC +/- drug. I conducted end-to-end processing for this experiment so all is included here.
 
 ChIPseq_251009: Again chipping DNMT1 in WT and C∆W both w/ DMSO, dTAG & dTAG_DNMT1i. This is also one I did end-to-end analysis so all scripts are included.
+
+EMseq_250417: Both WT and KR mutant in all 4 conditions listed above, n=2.
