@@ -1,0 +1,534 @@
+---
+title: "EMseq_250417_processing"
+author: "Andrea"
+date: "2025-04-29"
+output: html_document
+---
+
+Run initial processing of EMseq data with nf-core pipeline
+
+# set up project dir
+```{bash}
+cd /dawson_genomics/Projects/DNMTi/EMseq/250417
+
+mkdir scripts
+mkdir nf-core_methylseq
+mkdir logs
+```
+
+# run nextflow, initially running with bwa-meth as in EMseq paper
+```{bash}
+sbatch scripts/run_nfcore-methylseq.sbatch
+```
+
+# reran using bismark as done previously with RRBS to better replicate figs
+```{bash}
+sbatch scripts/run_nfcore-methylseq.sbatch
+```
+
+# make heatmaps over DNMT1 CGIs as in Fig 1
+# setup env, load libs, set paths
+```{r}
+library(edgeR)
+library(data.table)
+library(GenomicRanges)
+library(dplyr)
+library(RColorBrewer)
+library(circlize)
+library(ComplexHeatmap)
+library(ggplot2)
+library(openxlsx)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/EMseq/250417"
+md.dir <- file.path(project.dir, "nf-core_methylseq/methyldackel")
+plots.dir <- file.path(project.dir, "plots")
+```
+
+# load data and get avg Me% over peaks
+```{r}
+dnmt.peaks <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/DNMT1_peaks_ordered.bed")
+
+md.files <- list.files(md.dir, pattern = "_CpG.bedGraph", full.names = TRUE)
+
+# compile individual CGI files into single table
+# init w/first file
+md.file <- fread(md.files[1], skip = 1)
+md.df <- data.frame(
+  "chr" = md.file$V1,
+  "locus" = md.file$V2,
+  "id" = paste(md.file$V1, md.file$V2, sep = "_"),
+  "KR-gNT-DMSO-R1" = md.file$V4
+)
+# loop through remainder and add to df
+for(md.i in 2:length(md.files)){
+  md.file <- fread(md.files[md.i], skip = 1)
+  name <- gsub("Sample_", "", gsub(".markdup.sorted_CpG.bedGraph", "", basename(md.files[md.i])))
+  file.df <- data.frame(
+    "chr" = md.file$V1,
+    "locus" = md.file$V2,
+    "id" = paste(md.file$V1, md.file$V2, sep = "_"),
+    name = md.file$V4
+  )
+  colnames(file.df)[4] <- name
+  md.df <- merge(md.df, file.df, all = TRUE)
+}
+
+# write out compiled file
+write.table(
+  md.df,
+  file.path(project.dir, "results/all_sample_CpG.bed"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make GR objects for EMseq data and dnmt peaks
+dnmt.gr <- GRanges(dnmt.peaks$V1, IRanges(dnmt.peaks$V2, dnmt.peaks$V3))
+md.gr <- GRanges(md.df$chr, IRanges(md.df$locus, md.df$locus), id = md.df$id)
+
+# get overlap
+dnmt.md <- data.frame(mergeByOverlaps(md.gr, dnmt.gr, minoverlap = 1L))
+# keep only columns of interest
+all <- dnmt.md[, c(7:10)]
+all$id_dnmt <- paste0(all$dnmt.gr.seqnames, ":", all$dnmt.gr.start, "_", all$dnmt.gr.end)
+temp <- left_join(md.df, all, "id")
+md.df$dnmt_id <- temp$id_dnmt
+# only keep those found in dnmt peaks
+in.dnmt <- !is.na(md.df$dnmt_id)
+md.dnmt.df <- md.df[in.dnmt, ]
+# average methylation % counts over dnmt peaks
+md.dnmt.avg <- aggregate(
+  md.dnmt.df[, 4:19], 
+  list(md.dnmt.df$dnmt_id), 
+  FUN = mean, 
+  na.action = na.pass, 
+  na.rm = TRUE
+  )
+colnames(md.dnmt.avg)[1] <- "dnmt_id"
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(md.dnmt.avg$dnmt_id, ":")
+md.dnmt.avg$Chr <- chr.pos[, 1]
+start.end <- strsplit2(chr.pos[, 2], "_")
+md.dnmt.avg$Start <- as.numeric(start.end[, 1])
+md.dnmt.avg$End <- as.numeric(start.end[, 2])
+md.dnmt <- merge(
+  dnmt.peaks, 
+  md.dnmt.avg, 
+  by.x = c("V1", "V2", "V3"), 
+  by.y = c("Chr", "Start", "End"), 
+  all.x = TRUE, 
+  sort = FALSE
+  )
+
+# set id as rownames
+coords <- paste0(md.dnmt$V1, ":", md.dnmt$V2, "_", md.dnmt$V3)
+rownames(md.dnmt) <- coords
+
+# needs to be matrix and only number cols 
+heat.md <- as.matrix(md.dnmt[, 5:20])
+
+col_spec = rev(brewer.pal(11, name = "Spectral"))
+pdf(
+  file.path(plots.dir, "Heatmap_EMseq_DNMT1_peaks_ChIP_ordered.pdf"), 
+  width = 20, 
+  height = 20
+  )
+Heatmap(
+  heat.md, 
+  cluster_rows = FALSE, 
+  cluster_columns = FALSE, 
+  show_row_names = FALSE, 
+  use_raster = FALSE,
+  col = col_spec
+  )
+dev.off()
+```
+
+# make the same heatmap for KR chip peak files
+```{r}
+dmso.peaks <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/250217/macs/broadpeaks/DNMT1-WT-DMSO-R2_S51_peaks.broadPeak")
+drug.peaks <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/250217/macs/broadpeaks/DNMT1-WT-DNMT1i-R2_S33_peaks.broadPeak")
+# add "chr" to match other files
+dmso.peaks$V1 <- paste0("chr", dmso.peaks$V1)
+drug.peaks$V1 <- paste0("chr", drug.peaks$V1)
+
+# make GR objects for peaks files
+dmso.gr <- GRanges(dmso.peaks$V1, IRanges(dmso.peaks$V2, dmso.peaks$V3))
+drug.gr <- GRanges(drug.peaks$V1, IRanges(drug.peaks$V2, drug.peaks$V3))
+
+# get overlap w/me for each
+dmso.md <- data.frame(mergeByOverlaps(md.gr, dmso.gr, minoverlap = 1L))
+drug.md <- data.frame(mergeByOverlaps(md.gr, drug.gr, minoverlap = 1L))
+
+# process each overlap file into heatmap format, start w/dmso
+# keep only columns of interest, reuse all & temp vars to conserve mem 
+all <- dmso.md[, c(7:10)]
+all$id_dmso <- paste0(all$dmso.gr.seqnames, ":", all$dmso.gr.start, "_", all$dmso.gr.end)
+temp <- left_join(md.df, all, "id")
+md.df$dmso_id <- temp$id_dmso
+# only keep those found in dmso peaks
+in.dmso <- !is.na(md.df$dmso_id)
+md.dmso.df <- md.df[in.dmso, ]
+# average methylation % counts over dmso peaks
+md.dmso.avg <- aggregate(
+  md.dmso.df[, 4:19], 
+  list(md.dmso.df$dmso_id), 
+  FUN = mean, 
+  na.action = na.pass, 
+  na.rm = TRUE
+  )
+colnames(md.dmso.avg)[1] <- "dmso_id"
+
+# add coordinates as columns to merge with dmso peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(md.dmso.avg$dmso_id, ":")
+md.dmso.avg$Chr <- chr.pos[, 1]
+start.end <- strsplit2(chr.pos[, 2], "_")
+md.dmso.avg$Start <- as.numeric(start.end[, 1])
+md.dmso.avg$End <- as.numeric(start.end[, 2])
+md.dmso <- merge(
+  dmso.peaks, 
+  md.dmso.avg, 
+  by.x = c("V1", "V2", "V3"), 
+  by.y = c("Chr", "Start", "End"), 
+  all.x = TRUE, 
+  sort = FALSE
+  )
+
+# set id as rownames
+coords <- paste0(md.dmso$V1, ":", md.dmso$V2, "_", md.dmso$V3)
+rownames(md.dmso) <- coords
+
+# needs to be matrix and only number cols 
+heat.md.dmso <- as.matrix(md.dmso[, 11:26])
+
+col_spec = rev(brewer.pal(11, name = "Spectral"))
+pdf(
+  file.path(plots.dir, "Heatmap_EMseq_KR_ChIP_DMSO_peaks_ordered.pdf"), 
+  width = 20, 
+  height = 20
+  )
+Heatmap(
+  heat.md.dmso, 
+  cluster_rows = FALSE, 
+  cluster_columns = FALSE, 
+  show_row_names = FALSE, 
+  use_raster = FALSE,
+  col = col_spec
+  )
+dev.off()
+
+# now same for DNMTi
+all <- drug.md[, c(7:10)]
+all$id_drug <- paste0(all$drug.gr.seqnames, ":", all$drug.gr.start, "_", all$drug.gr.end)
+temp <- left_join(md.df, all, "id")
+md.df$drug_id <- temp$id_drug
+# only keep those found in drug peaks
+in.drug <- !is.na(md.df$drug_id)
+md.drug.df <- md.df[in.drug, ]
+# average methylation % counts over dnmt peaks
+md.drug.avg <- aggregate(
+  md.drug.df[, 4:19], 
+  list(md.drug.df$drug_id), 
+  FUN = mean, 
+  na.action = na.pass, 
+  na.rm = TRUE
+  )
+colnames(md.drug.avg)[1] <- "drug_id"
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(md.drug.avg$drug_id, ":")
+md.drug.avg$Chr <- chr.pos[, 1]
+start.end <- strsplit2(chr.pos[, 2], "_")
+md.drug.avg$Start <- as.numeric(start.end[, 1])
+md.drug.avg$End <- as.numeric(start.end[, 2])
+md.drug <- merge(
+  drug.peaks, 
+  md.drug.avg, 
+  by.x = c("V1", "V2", "V3"), 
+  by.y = c("Chr", "Start", "End"), 
+  all.x = TRUE, 
+  sort = FALSE
+  )
+
+# set id as rownames
+coords <- paste0(md.drug$V1, ":", md.drug$V2, "_", md.drug$V3)
+rownames(md.drug) <- coords
+
+# needs to be matrix and only number cols 
+heat.md.drug <- as.matrix(md.drug[, 11:26])
+
+col_spec = rev(brewer.pal(11, name = "Spectral"))
+pdf(
+  file.path(plots.dir, "Heatmap_EMseq_KR_ChIP_DNMTi_peaks_ordered.pdf"), 
+  width = 20, 
+  height = 20
+  )
+Heatmap(
+  heat.md.drug, 
+  cluster_rows = FALSE, 
+  cluster_columns = FALSE, 
+  show_row_names = FALSE, 
+  use_raster = FALSE,
+  col = col_spec
+  )
+dev.off()
+```
+
+# now attempt deeptools heatmap over mints in 500 bp bins
+# as "forward" strand is methylated reads make a bw for just forward reads
+# also make normal total reads bw and then ratio bw of Me/total
+```{bash}
+for bam in bismark_work/bismark/alignments/*-R1.deduplicated.sorted.bam
+do
+dname=`dirname $bam`
+bname=`basename $bam -R1.deduplicated.sorted.bam`
+sbatch scripts/mergeBamCov.sbatch $bam ${dname}/${bname}-R2.deduplicated.sorted.bam
+done
+
+sbatch scripts/DeeptoolsBWComp.sbatch \
+  bigwigs/Sample_WT-gNT-DMSO_RPGCnorm_Me.bw \
+  bigwigs/Sample_WT-gNT-DMSO_RPGCnorm.bw \
+  WT-gNT-DMSO
+  
+sbatch scripts/DeeptoolsBWComp.sbatch \
+  bigwigs/Sample_WT-gNT-DNMT1i_RPGCnorm_Me.bw \
+  bigwigs/Sample_WT-gNT-DNMT1i_RPGCnorm.bw \
+  WT-gNT-DNMT1i
+  
+sbatch scripts/DeeptoolsBWComp.sbatch \
+  bigwigs/Sample_WT-gRNF4-DMSO_RPGCnorm_Me.bw \
+  bigwigs/Sample_WT-gRNF4-DMSO_RPGCnorm.bw \
+  WT-gRNF4-DMSO
+  
+sbatch scripts/DeeptoolsBWComp.sbatch \
+  bigwigs/Sample_WT-gRNF4-DNMT1i_RPGCnorm_Me.bw \
+  bigwigs/Sample_WT-gRNF4-DNMT1i_RPGCnorm.bw \
+  WT-gRNF4-DNMT1i
+```
+
+# make heatmap as for RNAseq
+```{bash}
+sbatch scripts/DT_heatmap_mintRNA_5kb_1Mb_Me_ratio.sbatch
+```
+
+# DT heatmap didn't work too stchastic & values don't fully make sense
+# redo as heatmaps above
+# for these matrices rows are mints and cols are bins across coordinates in Fig4i
+```{r}
+# load bed from fig4i, need to preserve order
+mint.bed <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/REDItools/bed_files/mintRNA_expression_ordered_5kb_500kb.bed")
+
+# read in compiled Me file
+md.df <- fread(file.path(project.dir, "results/all_sample_CpG.bed"))
+
+# make GR object for mints by bin,
+# for each mint start 50k upstream and end 500k downstream
+# init df w/ first mint
+mint.bins <- data.frame(
+  "chr" = rep(mint.bed$`#chrom`[1], 1100), 
+  "start" = seq(mint.bed$start[1] - 50000, mint.bed$start[1] + 499999, by = 500),
+  "end" = seq(mint.bed$start[1] - 50000, mint.bed$start[1] + 499999, by = 500) + 499,
+  "name" = rep(mint.bed$name[1], 1100),
+  "bin" = paste0("bin_", 1:1100)
+)
+# loop through remaining mints to add on same for all
+for(mint.i in 2:nrow(mint.bed)){
+  bin.x <- data.frame(
+    "chr" = rep(mint.bed$`#chrom`[mint.i], 1100), 
+    "start" = seq(mint.bed$start[mint.i] - 50000, mint.bed$start[mint.i] + 499999, by = 500),
+    "end" = seq(mint.bed$start[mint.i] - 50000, mint.bed$start[mint.i] + 499999, by = 500) + 499,
+    "name" = rep(mint.bed$name[mint.i], 1100),
+    "bin" = paste0("bin_", 1:1100)
+  )
+  mint.bins <- rbind(mint.bins, bin.x)
+}
+# now make into gr object
+mint.gr <- GRanges(
+  mint.bins$chr, 
+  IRanges(mint.bins$start, mint.bins$end), 
+  name = mint.bins$name, 
+  bin = mint.bins$bin
+  )
+
+# get overlap
+mint.md <- data.frame(mergeByOverlaps(md.gr, mint.gr, minoverlap = 1L))
+# keep only columns of interest
+all <- mint.md[, c(7:10, 15:16)]
+all$loc_mint <- paste0(all$mint.gr.seqnames, ":", all$mint.gr.start, "_", all$mint.gr.end)
+temp <- left_join(md.df, all, "id")
+md.df$mint_loc <- temp$loc_mint
+md.df$mint_name <- temp$name
+md.df$mint_bin <- temp$bin
+# only keep those found in dnmt peaks
+in.mint <- !is.na(md.df$mint_loc)
+md.mint.df <- md.df[in.mint, ]
+# average methylation % counts over dnmt peaks
+md.mint.avg <- aggregate(
+  md.mint.df[, 4:19], 
+  list(md.mint.df$mint_loc, md.mint.df$mint_name, md.mint.df$mint_bin), 
+  FUN = mean, 
+  na.action = na.pass, 
+  na.rm = TRUE
+  )
+colnames(md.mint.avg)[1:3] <- c("mint_loc", "mint_name", "mint_bin")
+
+# merge with mint file and fill blanks to match and maintain RNAseq heatmap sorting
+md.mint <- merge(
+  mint.bins, 
+  md.mint.avg, 
+  by.x = c("name", "bin"), 
+  by.y = c("mint_name", "mint_bin"), 
+  all.x = TRUE, 
+  sort = FALSE
+  )
+
+# build a list of individual dfs for each sample
+md.mint.list <- list()
+md.samples <- c("WT-gNT-DMSO", "WT-gNT-DNMT1i", "WT-gRNF4-DMSO", "WT-gRNF4-DNMT1i")
+for(md.i in 1:length(md.samples)){
+  # get df subsetted to info of interest
+  samp.df <- md.mint[, c(1:2, which(grepl(md.samples[md.i], colnames(md.mint))))]
+  # get average Me across replicates
+  samp.df$Me_mean <- rowMeans(samp.df[, 3:4])
+  # make a row of mean Me by ordered bins for each mint 
+  # in same order as RNAseq fig and compile into table of mints by bins
+  heat.df <- data.frame()
+  for(mint.i in 1:nrow(mint.bed)){
+    # get subset of mint
+    mint.sub <- samp.df[which(samp.df$name == mint.bed$name[mint.i]), c(1, 2, 5)]
+    # order by bins
+    mint.sub <- mint.sub[order(as.numeric(gsub("bin_", "", mint.sub$bin))), ]
+    # transpose as row in df
+    heat.df <- rbind(heat.df, t(mint.sub$Me_mean))
+    # name row as mint name
+    rownames(heat.df)[mint.i] <- mint.sub$name[1]
+  }
+  # add df to list
+  md.mint.list[[md.i]] <- heat.df
+  # coerce to matrix for heatmap
+  heat.mat <- as.matrix(heat.df)
+  # make heatmap
+  pdf(
+    file.path(plots.dir, paste0("Heatmap_EMseq_mintRNAs_Fig4i_", md.samples[md.i], ".pdf")), 
+    width = 6, 
+    height = 8
+    )
+  Heatmap(
+    heat.mat, 
+    cluster_rows = FALSE, 
+    cluster_columns = FALSE, 
+    show_row_names = FALSE,
+    show_column_names = FALSE, 
+    use_raster = FALSE,
+    col = col_spec
+    )
+  dev.off()
+}
+names(md.mint.list) <- md.samples
+```
+
+# make histogram (for each heatmap) of average %Me for each bin to complement
+# density plots over heatmaps for other modalities
+```{r}
+# loop through heatmap df list and make hist of colMeans
+for(hm.i in 1:length(md.mint.list)){
+  colmean.df <- data.frame(
+    "me.avg" = colMeans(md.mint.list[[hm.i]], na.rm = TRUE),
+    "bin" = factor(colnames(md.mint.list[[hm.i]]), levels = colnames(md.mint.list[[hm.i]]))
+  )
+  
+  pdf(
+    file.path(plots.dir, paste0("barplot_avgMe_mint_heatmap_", names(md.mint.list)[[hm.i]], ".pdf")),
+    height = 4,
+    width = 4
+    )
+  ggplot(colmean.df, aes(x = bin, y = me.avg)) +
+    geom_bar(stat = "identity") +
+    theme_classic() +
+    theme(axis.text.x = element_blank()) +
+    ylim(0, 100) + ggtitle(names(md.mint.list)[[hm.i]])
+  dev.off()
+}
+```
+
+# wanting to do a proper DMR analysis so I've cloned the github repo for DMRichR
+# (v1.7.1) in my home dir. Appears to need to run as an R script rather than an 
+# interactive package. This will also allow submission as an sbatch job.
+#
+# first need to convert bismark coverage files to cytosine reports
+```{bash}
+# actually only bedgraphs in the format needed to convert were outout from 
+# running the methyldackyl pipeline so use those as input
+for bdg in nf-core_methylseq/methyldackel/*sorted_CpG.bedGraph
+do
+sbatch scripts/bismarkCytosineReport.sbatch $bdg
+done
+```
+
+# sample sheet is required to be in xlsx format for some reason, doing so and 
+# making sure treatment variable is alphabetically after control as required
+```{r}
+cyto.rep.dir <- file.path(project.dir, "bismark_work/bismark/cytosine_reports")
+cov.files <- list.files(
+  cyto.rep.dir,
+  pattern = "CpG_report.txt.gz"
+  )
+# I have to remove "Sample_" in the names in order for it to work
+sample.names <- NULL
+for(cf in cov.files){
+  new.name <- gsub("Sample_", "", cf)
+  file.rename(
+    file.path(cyto.rep.dir, cf),
+    file.path(cyto.rep.dir, new.name)
+  )
+  sample.names <- c(sample.names, new.name)
+}
+
+sample.names <- gsub(".CpG_report.txt.gz", "", sample.names)
+
+cov.ann <- data.frame(
+  "Name" = sample.names,
+  "Group" = gsub("-R[12]", "", sample.names)
+)
+# software requires that control group designation is alphabetically before test 
+# (REALLY) so prepending groups w/ C or T
+cov.ann$Group[1:8] <- paste0("T_", cov.ann$Group[1:8])
+cov.ann$Group[9:16] <- paste0("C_", cov.ann$Group[9:16])
+
+# now write as excel sheet WITH ONLY SAMPLES OF INTEREST!!
+# first I'll do gNT DMSO comparison and then have to redo for gRNF4 DNMTi
+write.xlsx(
+  cov.ann[c(1:2, 9:10), ],
+  file.path(cyto.rep.dir, "sample_info.xlsx")
+)
+```
+
+# now everything should be sorted for DMRichR gNT DMSO comp
+```{bash}
+# mut be run from dir w/cov reports as wd
+cd bismark_work/bismark/cytosine_reports/
+
+sbatch ../../../scripts/DMRichR.sbatch
+```
+
+# abanoning this software as a lost cause. no matter how I try to run it it fails
+# with no output at all or error message (even running interactively w/--verbose)
+# trying another software DMRfinder which also uses the cytosine report, but 
+# needs the --merge_CpG flag so rerunning accordingly
+```{bash}
+for bdg in nf-core_methylseq/methyldackel/*sorted_CpG.bedGraph
+do
+sbatch scripts/bismarkCytosineReport.sbatch $bdg
+done
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_EMseq_250417.txt"))
+)
+```
