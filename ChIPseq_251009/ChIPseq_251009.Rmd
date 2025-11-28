@@ -1,0 +1,135 @@
+---
+title: "ChIPseq_251009"
+author: "Andrea"
+date: "2025/10/13"
+output: html_document
+---
+
+fastq location: /pipeline/Runs/NextSeq/251009_VH01624_366_AACYH5THV/ProjectFolders/Project_Jesse-Balic/*
+project directory: /dawson_genomics/Projects/DNMTi/ChIPseq/251009/
+
+# set up project dir and process (fastqc, trim, align, tdfs)
+```{bash}
+mkdir alignment
+mkdir fastqc
+mkdir fastq_screen
+mkdir trimmed_fastqs
+mkdir logs
+mkdir scripts
+mkdir tdfs
+
+for fq in /pipeline/Runs/NextSeq/251009_VH01624_366_AACYH5THV/ProjectFolders/Project_Jesse-Balic/*/*_R1_001.fastq.gz
+do
+sbatch scripts/alignHg38.sbatch $fq
+done
+
+# run multiqc to collate reports
+module load py-multiqc/1.15-gcc-13.2.0
+multiqc .
+```
+
+# peak calling (both narrow and broad) include bedgraph output for Spark plots and diff peaks if needed
+```{bash}
+mkdir -p macs/narrowpeaks
+mkdir -p macs/broadpeaks
+
+for bam in alignment/MV411*ChIP*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/MV411-A3-DMSO-24h-input_S174.sort.rmdup.bam
+done
+
+for bam in alignment/[CW][TW]-DMSO-ChIP*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/WT-DMSO-R2-input_S171.sort.rmdup.bam
+done
+
+for bam in alignment/[CW][TW]-dTAG*ChIP*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/WT-dTAG-DNMT1i-R2-input_S172.sort.rmdup.bam
+done
+```
+
+# make bigwigs for DT plots
+```{bash}
+mkdir bigwigs
+
+for bam in alignment/*sort.rmdup.bam
+do
+sbatch scripts/DeeptoolsBamCov.sbatch $bam
+done
+```
+
+# make DNMT CGI peaks as in manuscript including inputs
+```{bash}
+mkdir results
+mkdir plots 
+
+sbatch scripts/DTMatrix_DNMT_CGI_peaks_refpoint_1009chips.sbatch
+```
+
+# merge replicate bedgraphs by mean for reps as needed
+```{bash}
+dname=macs/broadpeaks
+
+sbatch scripts/cmbreps.sbatch ${dname}/CW-DMSO-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/CW-DMSO-ChIP-GFP-R1_S177_treat_pileup.bdg \
+  ${dname}/CW-DMSO-ChIP-GFP-R2_S163_treat_pileup.bdg
+
+sbatch scripts/cmbreps.sbatch ${dname}/CW-dTAG-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/CW-dTAG-ChIP-GFP-R1_S178_treat_pileup.bdg \
+  ${dname}/CW-dTAG-ChIP-GFP-R2_S164_treat_pileup.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/CW-dTAG-DNMT1i-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/CW-dTAG-DNMT1i-ChIP-GFP-R1_S179_treat_pileup.bdg \
+  ${dname}/CW-dTAG-DNMT1i-ChIP-GFP-R2_S165_treat_pileup.bdg
+
+sbatch scripts/cmbreps.sbatch ${dname}/WT-DMSO-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/WT-DMSO-ChIP-GFP-R1_S173_treat_pileup.bdg \
+  ${dname}/WT-DMSO-ChIP-GFP-R2_S180_treat_pileup.bdg
+
+sbatch scripts/cmbreps.sbatch ${dname}/WT-dTAG-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/WT-dTAG-ChIP-GFP-R1_S175_treat_pileup.bdg \
+  ${dname}/WT-dTAG-ChIP-GFP-R2_S181_treat_pileup.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/WT-dTAG-DNMT1i-ChIP-GFP_merged_treat_pileup.bdg \
+  ${dname}/WT-dTAG-DNMT1i-ChIP-GFP-R1_S176_treat_pileup.bdg \
+  ${dname}/WT-dTAG-DNMT1i-ChIP-GFP-R2_S182_treat_pileup.bdg
+```
+
+# also merge replicate bigwigs by mean and make heatmap as above w/ merged reps
+```{bash}
+sbatch scripts/DeeptoolsBWcomp.sbatch CW-DMSO-ChIP-GFP-R1_S177.RPGC.bw \
+  CW-DMSO-ChIP-GFP-R2_S163.RPGC.bw \
+  CW-DMSO-ChIP-GFP
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch CW-dTAG-ChIP-GFP-R1_S178.RPGC.bw \
+  CW-dTAG-ChIP-GFP-R2_S164.RPGC.bw \
+  CW-dTAG-ChIP-GFP
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch CW-dTAG-DNMT1i-ChIP-GFP-R1_S179.RPGC.bw \
+  CW-dTAG-DNMT1i-ChIP-GFP-R2_S165.RPGC.bw \
+  CW-dTAG-DNMT1i-ChIP-GFP
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch WT-DMSO-ChIP-GFP-R1_S173.RPGC.bw \
+  WT-DMSO-ChIP-GFP-R2_S180.RPGC.bw \
+  WT-DMSO-ChIP-GFP
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch WT-dTAG-ChIP-GFP-R1_S175.RPGC.bw \
+  WT-dTAG-ChIP-GFP-R2_S181.RPGC.bw \
+  WT-dTAG-ChIP-GFP
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch WT-dTAG-DNMT1i-ChIP-GFP-R1_S176.RPGC.bw \
+  WT-dTAG-DNMT1i-ChIP-GFP-R2_S182.RPGC.bw \
+  WT-dTAG-DNMT1i-ChIP-GFP
+
+sbatch scripts/DTMatrix_DNMT_CGI_peaks_refpoint_1009chips_merged.sbatch
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_ChIPseq_251009.txt"))
+)
+```
