@@ -1,0 +1,515 @@
+---
+title: "ChIPseq_250217"
+author: "Andrea"
+date: "2025/02/18"
+output: html_document
+---
+
+fastq location: /pipeline/Runs/NextSeq/250217_VH01624_251_AACN32HHV/ProjectFolders/Project_Jesse-Balic/*
+project directory: /dawson_genomics/Projects/DNMTi/ChIPseq/250217/
+
+# set up project dir and process (fastqc, trim, align, tdfs)
+```{bash}
+mkdir alignment
+mkdir fastqc
+mkdir fastq_screen
+mkdir trimmed_fastqs
+mkdir logs
+mkdir scripts
+mkdir tdfs
+
+for fq in /pipeline/Runs/NextSeq/250217_VH01624_251_AACN32HHV/ProjectFolders/Project_Jesse-Balic/*/*_R1_001.fastq.gz
+do
+sbatch scripts/alignHg38.sbatch $fq
+done
+
+# run multiqc to collate reports
+module load py-multiqc/1.15-gcc-13.2.0
+multiqc .
+```
+
+# peak calling (both narrow and broad) include bedgraph output for Spark plots and diff peaks if needed
+```{bash}
+mkdir -p macs/narrowpeaks
+mkdir -p macs/broadpeaks
+
+for bam in alignment/DNMT*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/INPUT-1_S41.sort.rmdup.bam
+done
+```
+
+# make bigwigs for DT plots
+```{bash}
+mkdir bigwigs
+
+for bam in alignment/*sort.rmdup.bam
+do
+sbatch scripts/DeeptoolsBamCov.sbatch $bam
+done
+```
+
+# make DT plots for DMSO & drug peaks
+```{bash}
+mkdir results
+mkdir plots
+
+sbatch scripts/DTMatrix_DNMT1_CXXC_peaks_refpoint.sbatch
+sbatch scripts/DTMatrix_DNMT1_KR_peaks_refpoint.sbatch
+```
+
+# now also DNMT CGI peaks as in manuscript
+```{bash}
+sbatch scripts/DTMatrix_DNMT1_CGI_CXXC_peaks_refpoint.sbatch
+sbatch scripts/DTMatrix_DNMT1_CGI_KR_peaks_refpoint.sbatch
+```
+
+# init R env
+```{r}
+library(data.table)
+library(Rsubread)
+library(ggplot2)
+library(ggpubr)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/ChIPseq/250217"
+plots.dir <- file.path(project.dir, "plots")
+setwd(project.dir)
+```
+
+# make saf and get counts over CGI DNMT1 peaks as in fig 1 to make scatterplots of inputs
+```{r}
+dnmt.cgi.bed <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/DNMT1_CGI.bed")
+dnmt.cgi.saf <- data.frame(
+  "GeneID" = paste0("peak_", 1:nrow(dnmt.cgi.bed)), 
+  "Chr" = dnmt.cgi.bed$V1, 
+  "Start" = dnmt.cgi.bed$V2, 
+  "End" = dnmt.cgi.bed$V3, 
+  "Strand" = "*"
+)
+
+input.bams <- list.files("alignment", pattern = "INPUT.*sort.rmdup.bam$", full.names = TRUE)
+
+dnmt.cgi.counts <- featureCounts(
+  input.bams,
+  annot.ext = dnmt.cgi.saf
+)
+colnames(dnmt.cgi.counts$counts) <- gsub(".sort.rmdup.bam", "", colnames(dnmt.cgi.counts$counts))
+dnmt.cgi.df <- as.data.frame(dnmt.cgi.counts$counts)
+
+# make scatterplot of DNMT1 v input for each condition
+ct <- cor.test(dnmt.cgi.df$`INPUT-1_S41`, dnmt.cgi.df$`INPUT-2_S42`)
+pdf("plots/Scatterplot_INPUT1vINPUT2.pdf")
+plot(
+  dnmt.cgi.df$`INPUT-1_S41`,
+  dnmt.cgi.df$`INPUT-2_S42`, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 550),
+  ylim = c(0, 550),
+  xlab = "Input-1_S41",
+  ylab = "Input-2-S42"
+  )
+abline(a = 0, b = 1, col = "red")
+text(50, 450, paste0("R = ", round(ct$estimate, 4)))
+text(50, 425, paste0("p <= ", ct$p.value))
+dev.off()
+```
+
+# merge replicates by mean for 2 reps in CXXC exp and make heatmap
+```{bash}
+sbatch scripts/DeeptoolsBWcomp.sbatch DNMT1-WT-DMSO-R1_S37.RPGC.bw \
+  DNMT1-WT-DMSO-R2_S51.RPGC.bw \
+  DNMT1-WT-DMSO
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch DNMT1-WT-DNMT1i-R1_S38.RPGC.bw \
+  DNMT1-WT-DNMT1i-R2_S33.RPGC.bw \
+  DNMT1-WT-DNMT1i
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch DNMT1-CXXC-DMSO-R1_S39.RPGC.bw \
+  DNMT1-CXXC-DMSO-R2_S34.RPGC.bw \
+  DNMT1-CXXC-DMSO
+  
+sbatch scripts/DeeptoolsBWcomp.sbatch DNMT1-CXXC-DNMT1i-R1_S40.RPGC.bw \
+  DNMT1-CXXC-DNMT1i-R2_S35.RPGC.bw \
+  DNMT1-CXXC-DNMT1i
+
+sbatch scripts/DTMatrix_DNMT1_CGI_CXXC_merged_peaks_refpoint.sbatch
+```
+
+# merge bedgraphs for treat & ctrl of ∆CXXC & WT for diff peaks
+```{bash}
+dname=macs/broadpeaks
+
+sbatch scripts/cmbreps.sbatch ${dname}/DNMT1-CXXC-DMSO_merged_treat_pileup.bdg \
+  ${dname}/DNMT1-CXXC-DMSO-R1_S39_treat_pileup.bdg \
+  ${dname}/DNMT1-CXXC-DMSO-R2_S34_treat_pileup.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/DNMT1-CXXC-DMSO_merged_control_lambda.bdg \
+  ${dname}/DNMT1-CXXC-DMSO-R1_S39_control_lambda.bdg \
+  ${dname}/DNMT1-CXXC-DMSO-R2_S34_control_lambda.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/DNMT1-WT-DMSO_merged_treat_pileup.bdg \
+  ${dname}/DNMT1-WT-DMSO-R1_S37_treat_pileup.bdg \
+  ${dname}/DNMT1-WT-DMSO-R2_S51_treat_pileup.bdg
+  
+sbatch scripts/cmbreps.sbatch ${dname}/DNMT1-WT-DMSO_merged_control_lambda.bdg \
+  ${dname}/DNMT1-WT-DMSO-R1_S37_control_lambda.bdg \
+  ${dname}/DNMT1-WT-DMSO-R2_S51_control_lambda.bdg
+```
+
+# now do diff peak calling
+```{bash}
+dname=macs/broadpeaks
+
+sbatch scripts/bdgdiff.sbatch ${dname}/DNMT1-CXXC-DMSO_merged_treat_pileup.bdg \
+  ${dname}/DNMT1-CXXC-DMSO_merged_control_lambda.bdg \
+  ${dname}/DNMT1-WT-DMSO_merged_treat_pileup.bdg \
+  ${dname}/DNMT1-WT-DMSO_merged_control_lambda.bdg \
+  DNMT1-DMSO-CXXCvsWT
+```
+
+# make heatmap over ∆CXXC ∆RFTS ∆RC diff peaks 
+```{bash}
+sbatch scripts/DTMatrix_merged_CXXC_RFTS_RC_diffpeaks_refpoint.sbatch
+```
+
+# make corr scatterplots of chips from Jesse vs Brian, using dnmt1 cgis again
+```{r}
+jesse.bams <- list.files(
+  "alignment", 
+  pattern = "DNMT1-WT-.*sort.rmdup.bam$", 
+  full.names = TRUE
+  )
+
+jesse.cgi.counts <- featureCounts(
+  jesse.bams,
+  annot.ext = dnmt.cgi.saf
+)
+colnames(jesse.cgi.counts$counts) <- gsub(
+  ".sort.rmdup.bam", 
+  "", 
+  colnames(jesse.cgi.counts$counts)
+  )
+jesse.cgi.df <- as.data.frame(jesse.cgi.counts$counts)
+
+# get counts for brian's chips as well
+brian.bams <- list.files(
+  "/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bam", 
+  pattern = "DNMT1_.*[CG].bam$", 
+  full.names = TRUE
+  )
+
+brian.cgi.counts <- featureCounts(
+  brian.bams,
+  annot.ext = dnmt.cgi.saf, 
+  isPairedEnd = TRUE
+)
+colnames(brian.cgi.counts$counts) <- gsub(
+  "_H7K2TDSX2_[ACGT]{8}.bam", 
+  "", 
+  colnames(brian.cgi.counts$counts)
+  )
+brian.cgi.df <- as.data.frame(brian.cgi.counts$counts)
+
+# make scatterplot of each of jesse's reps v Brians equivalent
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-DMSO-R1_S37`, brian.cgi.df$DNMT1_ChIP_gNT_0nm)
+pdf("plots/Scatterplot_JvB_WT_DMSO_R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-DMSO-R1_S37`,
+  brian.cgi.df$DNMT1_ChIP_gNT_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-DMSO-R1",
+  ylab = "Brian gNT_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_0nm ~ jesse.cgi.df$`DNMT1-WT-DMSO-R1_S37`), col = "red")
+text(25, 1300, paste0("R = ", round(ct$estimate, 4)))
+text(25, 1250, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-DMSO-R2_S51`, brian.cgi.df$DNMT1_ChIP_gNT_0nm)
+pdf("plots/Scatterplot_JvB_WT_DMSO_R2.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-DMSO-R2_S51`,
+  brian.cgi.df$DNMT1_ChIP_gNT_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-DMSO-R2",
+  ylab = "Brian gNT_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_0nm ~ jesse.cgi.df$`DNMT1-WT-DMSO-R2_S51`), col = "red")
+text(75, 1300, paste0("R = ", round(ct$estimate, 4)))
+text(75, 1250, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-DNMT1i-R1_S38`, brian.cgi.df$DNMT1_ChIP_gNT_100nm)
+pdf("plots/Scatterplot_JvB_WT_DNMT1i_R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-DNMT1i-R1_S38`,
+  brian.cgi.df$DNMT1_ChIP_gNT_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-DNMT1i-R1",
+  ylab = "Brian gNT_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_100nm ~ jesse.cgi.df$`DNMT1-WT-DNMT1i-R1_S38`), col = "red")
+text(25, 3250, paste0("R = ", round(ct$estimate, 4)))
+text(25, 3100, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-DNMT1i-R2_S33`, brian.cgi.df$DNMT1_ChIP_gNT_100nm)
+pdf("plots/Scatterplot_JvB_WT_DNMT1i_R2.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-DNMT1i-R2_S33`,
+  brian.cgi.df$DNMT1_ChIP_gNT_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-DNMT1i-R2",
+  ylab = "Brian gNT_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_100nm ~ jesse.cgi.df$`DNMT1-WT-DNMT1i-R2_S33`), col = "red")
+text(50, 3250, paste0("R = ", round(ct$estimate, 4)))
+text(50, 3100, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-gNT-DMSO-R1_S43`, brian.cgi.df$DNMT1_ChIP_gNT_0nm)
+pdf("plots/Scatterplot_JvB_WT-gNT-DMSO-R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-gNT-DMSO-R1_S43`,
+  brian.cgi.df$DNMT1_ChIP_gNT_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-gNT-DMSO-R1",
+  ylab = "Brian gNT_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_0nm ~ jesse.cgi.df$`DNMT1-WT-gNT-DMSO-R1_S43`), col = "red")
+text(75, 1300, paste0("R = ", round(ct$estimate, 4)))
+text(75, 1250, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-gNT-DNMT1i-R1_S47`, brian.cgi.df$DNMT1_ChIP_gNT_100nm)
+pdf("plots/Scatterplot_JvB_WT-gNT-DNMT1i-R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-gNT-DNMT1i-R1_S47`,
+  brian.cgi.df$DNMT1_ChIP_gNT_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-gNT-DNMT1i-R1",
+  ylab = "Brian gNT_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_100nm ~ jesse.cgi.df$`DNMT1-WT-gNT-DNMT1i-R1_S47`), col = "red")
+text(75, 3250, paste0("R = ", round(ct$estimate, 4)))
+text(75, 3100, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-gRNF4-DMSO-R1_S44`, brian.cgi.df$DNMT1_ChIP_gRNF4_0nm)
+pdf("plots/Scatterplot_JvB_WT-gRNF4-DMSO-R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-gRNF4-DMSO-R1_S44`,
+  brian.cgi.df$DNMT1_ChIP_gRNF4_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-gRNF4-DMSO-R1",
+  ylab = "Brian gRNF4_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gRNF4_0nm ~ jesse.cgi.df$`DNMT1-WT-gRNF4-DMSO-R1_S44`), col = "red")
+text(75, 1300, paste0("R = ", round(ct$estimate, 4)))
+text(75, 1250, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(jesse.cgi.df$`DNMT1-WT-gRNF4-DNMT1i-R1_S48`, brian.cgi.df$DNMT1_ChIP_gRNF4_100nm)
+pdf("plots/Scatterplot_JvB_WT-gRNF4-DNMT1i-R1.pdf")
+plot(
+  jesse.cgi.df$`DNMT1-WT-gRNF4-DNMT1i-R1_S48`,
+  brian.cgi.df$DNMT1_ChIP_gRNF4_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlab = "Jesse WT-gRNF4-DNMT1i-R1",
+  ylab = "Brian gRNF4_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gRNF4_100nm ~ jesse.cgi.df$`DNMT1-WT-gRNF4-DNMT1i-R1_S48`), col = "red")
+text(100, 3250, paste0("R = ", round(ct$estimate, 4)))
+text(100, 3100, paste0("p <= ", ct$p.value))
+dev.off()
+```
+
+# now do the same for ATACseq vs input counterparts
+```{r}
+# get atacseq data
+atac.bams <- list.files(
+  "/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Processed_files_downsampled", 
+  pattern = "_merged_by_group_rmdup_sort_nMTnU_MAPQ.bam$", 
+  full.names = TRUE
+  )
+
+atac.cgi.counts <- featureCounts(
+  atac.bams,
+  annot.ext = dnmt.cgi.saf, 
+  isPairedEnd = TRUE
+)
+colnames(atac.cgi.counts$counts) <- gsub(
+  "_merged_by_group_rmdup_sort_nMTnU_MAPQ.bam$", 
+  "", 
+  colnames(atac.cgi.counts$counts)
+  )
+atac.cgi.df <- as.data.frame(atac.cgi.counts$counts)
+
+# make scatterplots
+ct <- cor.test(atac.cgi.df$`gNT-0nM`, brian.cgi.df$DNMT1_ChIP_gNT_0nm)
+pdf("plots/Scatterplot_ATACvBchip_gNT-0nM.pdf")
+plot(
+  atac.cgi.df$`gNT-0nM`,
+  brian.cgi.df$DNMT1_ChIP_gNT_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 22000),
+  ylim = c(0, 1200),
+  xlab = "ATACseq gNT_0nm",
+  ylab = "Brian gNT_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_0nm ~ atac.cgi.df$`gNT-0nM`), col = "red")
+text(2500, 1050, paste0("R = ", round(ct$estimate, 4)))
+text(2500, 1000, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(atac.cgi.df$`gNT-100nM`, brian.cgi.df$DNMT1_ChIP_gNT_100nm)
+pdf("plots/Scatterplot_ATACvBchip_gNT_100nm.pdf")
+plot(
+  atac.cgi.df$`gNT-100nM`,
+  brian.cgi.df$DNMT1_ChIP_gNT_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 18000),
+  ylim = c(0, 2700),
+  xlab = "ATACseq gNT_100nm",
+  ylab = "Brian gNT_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gNT_100nm ~ atac.cgi.df$`gNT-100nM`), col = "red")
+text(2000, 2600, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2500, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(atac.cgi.df$`gRNF4-0nM`, brian.cgi.df$DNMT1_ChIP_gRNF4_0nm)
+pdf("plots/Scatterplot_ATACvBchip_gRNF4_0nm.pdf")
+plot(
+  atac.cgi.df$`gRNF4-0nM`,
+  brian.cgi.df$DNMT1_ChIP_gRNF4_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 15000),
+  ylim = c(0, 1100),
+  xlab = "ATACseq gRNF4_0nm",
+  ylab = "Brian gRNF4_0nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gRNF4_0nm ~ atac.cgi.df$`gRNF4-0nM`), col = "red")
+text(2000, 1000, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 950, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(atac.cgi.df$`gRNF4-100nM`, brian.cgi.df$DNMT1_ChIP_gRNF4_100nm)
+pdf("plots/Scatterplot_ATACvBchip_gRNF4_100nm.pdf")
+plot(
+  atac.cgi.df$`gRNF4-100nM`,
+  brian.cgi.df$DNMT1_ChIP_gRNF4_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 19000),
+  ylim = c(0, 2600),
+  xlab = "ATACseq gRNF4_100nm",
+  ylab = "Brian gRNF4_100nm"
+  )
+abline(lm(brian.cgi.df$DNMT1_ChIP_gRNF4_100nm ~ atac.cgi.df$`gRNF4-100nM`), col = "red")
+text(2000, 2300, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2200, paste0("p <= ", ct$p.value))
+dev.off()
+```
+
+# make barplot of proportions of chip reads falling into ATAC peaks (def open)
+```{r}
+atac.bed <- fread("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/data/all_ATAC_peaks.bed")
+
+atac.saf <- data.frame(
+  "GeneID" = paste0("peak_", 1:nrow(atac.bed)), 
+  "Chr" = atac.bed$V1, 
+  "Start" = atac.bed$V2, 
+  "End" = atac.bed$V3, 
+  "Strand" = "*"
+)
+
+brian.atac.counts <- featureCounts(
+  brian.bams,
+  annot.ext = atac.saf, 
+  isPairedEnd = TRUE
+)
+colnames(brian.atac.counts$counts) <- gsub(
+  "_H7K2TDSX2_[ACGT]{8}.bam", 
+  "", 
+  colnames(brian.atac.counts$counts)
+  )
+brian.atac.df <- as.data.frame(brian.atac.counts$counts)
+
+
+# stdout from subread, use below props for barplot
+//================================= Running ==================================\\
+||                                                                            ||
+|| Load annotation file .Rsubread_UserProvidedAnnotation_pid2082454 ...       ||
+||    Features : 89162                                                        ||
+||    Meta-features : 89162                                                   ||
+||    Chromosomes/contigs : 310                                               ||
+||                                                                            ||
+|| Process BAM file DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC.bam...              ||
+||    Paired-end reads are included.                                          ||
+||    Total alignments : 20121488                                             ||
+||    Successfully assigned alignments : 1503638 (7.5%)                       ||
+||    Running time : 1.34 minutes                                             ||
+||                                                                            ||
+|| Process BAM file DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG.bam...            ||
+||    Paired-end reads are included.                                          ||
+||    Total alignments : 18822533                                             ||
+||    Successfully assigned alignments : 861279 (4.6%)                        ||
+||    Running time : 1.25 minutes                                             ||
+||                                                                            ||
+|| Process BAM file DNMT1_ChIP_gRNF4_0nm_H7K2TDSX2_TAGCGCTC.bam...            ||
+||    Paired-end reads are included.                                          ||
+||    Total alignments : 20883984                                             ||
+||    Successfully assigned alignments : 1631101 (7.8%)                       ||
+||    Running time : 1.39 minutes                                             ||
+||                                                                            ||
+|| Process BAM file DNMT1_ChIP_gRNF4_100nm_H7K2TDSX2_ACTGAGCG.bam...          ||
+||    Paired-end reads are included.                                          ||
+||    Total alignments : 17543746                                             ||
+||    Successfully assigned alignments : 800923 (4.6%)                        ||
+||    Running time : 1.17 minutes                                             ||
+||                                                                            ||
+|| Write the final count table.                                               ||
+|| Write the read assignment summary.                                         ||
+||                                                                            ||
+\\============================================================================//
+
+# make table for bar plot
+bar.data <- data.frame(
+  "open" = c(7.5, 4.6, 7.8, 4.6),
+  "closed" = c(92.5, 95.4, 92.2, 95.4)
+)
+rownames(bar.data) <- gsub("DNMT1_ChIP_", "", colnames(brian.atac.df))
+  
+pdf(file.path(plots.dir, "propBar_Bchip_ATACpeaks.pdf"), height = 4, width = 4)
+par(mar = c(8, 4, 2, 6), xpd = TRUE)
+par(las = 2)
+barplot(
+  as.matrix(t(bar.data)), 
+  col = c("darkcyan", "orangered3"), 
+  width = 0.6,
+  ylab = "Percent"
+  )
+legend(
+  "topright", 
+  inset = c(-0.5, 0), 
+  legend = colnames(bar.data), 
+  fill = c("darkcyan", "orangered3"), 
+  title = "Group"
+  )
+dev.off()
+```
+
+# make heatmaps w/inputs for reviewers
+```{bash}
+sbatch scripts/DTMatrix_DNMT1_CGI_Winputs_refpoint.sbatch
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_ChIPseq_250217.txt"))
+)
+```
