@@ -1,0 +1,934 @@
+---
+title: "ChIP_figures_AG"
+author: "Andrea"
+date: '2022-06-15'
+output: html_document
+---
+
+# fastqs location: /pipeline/Archives/External/Dawson_Lab/AGRF/AGRF_CAGRF21056673_H7K2TDSX2
+
+# make new ChIP heatmaps for DNMT binding in CpG islands only
+```{r}
+library(annotatr)
+library(data.table)
+library(Rsubread)
+library(ggplot2)
+library(ggpubr)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/"
+
+# build annotation
+cpg.ann <- build_annotations(genome = 'hg38', annotations = "hg38_cpg_islands")
+
+# save cpg ann as bed to use bedtools intersect
+cpg.df <- data.frame(cpg.ann)
+write.table(
+  cpg.df[, 1:3],
+  file.path(project.dir, "bed_files/CGI.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# intersect DNMT peaks and CGIs, keeping peak coords only reporting once those with overlap in CGI
+```{bash}
+module load bedtools/2.27.1
+
+cd bed_files
+bedtools intersect -a DNMT1_peaks_ordered.bed -b CGI.bed -wa -u > DNMT1_CGI.bed
+```
+
+# make new heatmaps with CGI only bed
+```{bash}
+cd ..
+sbatch scripts/DTMat_CGI_DNMTi_ordered.sbatch 
+
+# now by CGI coords
+sbatch scripts/DTMat_CGIcoords_DNMTi_ordered.sbatch 
+
+# normalise by RPGC and then remake heatmap
+for bam in bam/DNMT1_ChIP*bam
+do
+sbatch scripts/BamCov.sbatch $bam
+done
+
+sbatch scripts/DTMat_CGIcoords_DNMTi_ordered.sbatch
+
+# now redo dnmt peaks heatmap with RPGCnorm
+sbatch scripts/DTMat_CGI_DNMT1_ordered.sbatch
+```
+
+# make ordered list of DNMT1 peaks with closed chromatin in presence of drug for Wendy
+```{r}
+# get ATAC peaks and make bed with same chr format as peaks file for use with bedtools
+atac <- fread("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Peak_calling/subread_ATAC_generich_a.saf", header = FALSE, sep = "\t")
+atac.bed <- cbind(gsub("chr", "", strsplit2(atac$V2, " ")[, 1]), strsplit2(atac$V2, " ")[, 2], strsplit2(atac$V2, " ")[, 3])
+
+write.table(
+  atac.bed,
+  "/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/data/all_ATAC_peaks_nochr.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# use bedtools intersect to get dnmt peaks that do not intersect with ATAC peaks (run interactively)
+```{bash}
+module load bedtools/2.27.1
+
+# from cihp macs dir
+bedtools intersect -a DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG_peaks.narrowPeak -b /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/data/all_ATAC_peaks_nochr.bed -wa -v > ../bed_files/gNT_100_DNMT1_peaks_no_ATAC_peak.bed
+```
+
+# get non-intersect file and order by binding
+```{r}
+n100.dnmt <- fread(file.path(project.dir, "/bed_files/gNT_100_DNMT1_peaks_no_ATAC_peak.bed"))
+
+colnames(n100.dnmt) <- c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")
+n100.dnmt <- n100.dnmt[order(n100.dnmt$signalValue, decreasing = TRUE), ]
+
+write.table(
+  n100.dnmt,
+  file.path(project.dir, "bed_files/gNT_100_DNMT1_peaks_no_ATAC_peak_signal_ordered.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make plots of feature makeup for chip data. Start with chipseeker for exploratory
+```{r}
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.refGene)
+txdb <- TxDb.Hsapiens.UCSC.hg38.refGene
+
+peak.files <- list.files(file.path(project.dir, "MACS"), pattern = "DNMT1.*peaks\\.bed", full.names = TRUE)
+#cs.peaks.list <- lapply(peak.files, readPeakFile)
+peak.anno.list <- lapply(peak.files, annotatePeak, tssRegion=c(-2000, 2000), TxDb = txdb, annoDb = "org.Hs.eg.db")
+names(peak.anno.list) <- gsub("DNMT1_ChIP_", "", gsub("_H7K2TDSX2_[A|T|C|G]{8}_peaks.bed", "", basename(peak.files)))
+plotAnnoBar(peak.anno.list)
+anno.df.list <- lapply(peak.anno.list, as.data.frame)
+```
+
+# define set of enhancers from H3K27ac ChIP peaks
+```{r}
+bed.dir <- file.path(project.dir, "bed_files")
+
+k27.peaks <- list.files(file.path(project.dir, "MACS"), pattern = "H3K27Ac.*peaks\\.bed", full.names = TRUE)
+k27.peak.anno.list <- lapply(k27.peaks, annotatePeak, tssRegion=c(-2000, 2000), TxDb = txdb, annoDb = "org.Hs.eg.db")
+names(k27.peak.anno.list) <- gsub("H3K27Ac_ChIP_", "", gsub("_H7K2TDSX2_[A|T|C|G]{8}_peaks.bed", "", basename(k27.peaks)))
+plotAnnoBar(k27.peak.anno.list)
+k27.anno.df.list <- lapply(k27.peak.anno.list, as.data.frame)
+
+# exclude TSS +/- 2kbp for enhancers, then make bed file
+i <- 1
+for(k27.anno.df in k27.anno.df.list){
+  keep <- which(abs(k27.anno.df$distanceToTSS) >= 2000)
+  enh.bed <- k27.anno.df[keep, c("seqnames", "start", "end", "strand")]
+  write.table(
+    enh.bed,
+    file.path(bed.dir, paste0(names(k27.anno.df.list)[[i]], "_enhancers.bed")),
+    sep = "\t",
+    col.names = FALSE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+  i <- i+1
+}
+
+# make bed file for each DNMT1 peaks file for intersect
+i <- 1
+for(anno.df in anno.df.list){
+  dnmt1.bed <- anno.df[, c("seqnames", "start", "end", "strand")]
+  write.table(
+    dnmt1.bed,
+    file.path(bed.dir, paste0(names(anno.df.list)[[i]], "_DNMT1_peaks.bed")),
+    sep = "\t",
+    col.names = FALSE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+  i <- i+1
+}
+```
+
+# perform bedtools intersect between DNMT1 peaks and enhancers for barplot, can be run interactive
+```{bash}
+module load bedtools/2.27.1 
+
+bedtools intersect -wa -a gNT_0nm_DNMT1_peaks.bed -b gNT_0nm_enhancers.bed > gNT_0nm_DNMT1_enhancers.bed
+bedtools intersect -wa -a gNT_100nm_DNMT1_peaks.bed -b gNT_100nm_enhancers.bed > gNT_100nm_DNMT1_enhancers.bed
+bedtools intersect -wa -a gRNF4_0nm_DNMT1_peaks.bed -b gRNF4_0nm_enhancers.bed > gRNF4_0nm_DNMT1_enhancers.bed
+bedtools intersect -wa -a gRNF4_100nm_DNMT1_peaks.bed -b gRNF4_100nm_enhancers.bed > gRNF4_100nm_DNMT1_enhancers.bed
+```
+
+# use anno.df above to extrapolate Mark's features of interest and make barplot
+```{r}
+library(RColorBrewer)
+plots.dir <- file.path(project.dir, "plots")
+
+bar.matrix <- matrix(nrow = 5, ncol = 4)
+i <- 1
+for(anno.df in anno.df.list){
+  sample.tss <- sum(abs(anno.df$distanceToTSS) <= 2000)
+  sample.exon <- sum(substr(anno.df$annotation, 1, 4) == "Exon")
+  sample.intron <- sum(substr(anno.df$annotation, 1, 6) == "Intron")
+  sample.intergenic <- sum(anno.df$annotation == "Distal Intergenic")
+  dnmt.enh <- read.table(file.path(bed.dir, paste0(names(anno.df.list)[[i]], "_DNMT1_enhancers.bed")), sep = "\t", header = FALSE)
+  sample.enh <- nrow(dnmt.enh)
+  bar.matrix[, i] <- c(sample.tss, sample.exon, sample.intron, sample.intergenic, sample.enh)
+  i <- i+1
+}
+colnames(bar.matrix) <- names(anno.df.list)
+rownames(bar.matrix) <- c("TSS+/-2kbp", "Exonic", "Intronic", "Intergenic", "Enhancers")
+
+colours <- brewer.pal(5, "Set1")
+pdf(file.path(plots.dir, paste0("barplot_DNMT1_features.pdf")), height = 8, width = 9)
+  par(mar = c(5, 4, 2, 6), xpd = TRUE)
+  barplot(
+    bar.matrix, 
+    col = colours, 
+    border = "white", 
+#    xlab = colnames(bar.matrix), 
+    ylab = "Number of peaks", 
+    ylim = c(0, 60000),
+    beside = TRUE,
+    bty = "L"
+    )
+  legend("topright", legend = rownames(bar.matrix), fill = colours, inset = c(-0.1, 0))
+dev.off()
+
+# make transposed bar matrix plot to reorder bars
+colours <- brewer.pal(4, "Set1")
+pdf(file.path(plots.dir, paste0("barplot_DNMT1_features_reordered.pdf")), height = 8, width = 9)
+  par(mar = c(5, 4, 2, 6), xpd = TRUE)
+  barplot(
+    t(bar.matrix), 
+    col = colours, 
+    border = "white", 
+#    xlab = colnames(bar.matrix), 
+    ylab = "Number of peaks", 
+    ylim = c(0, 60000),
+    beside = TRUE,
+    bty = "L"
+    )
+  legend("topright", legend = colnames(bar.matrix), fill = colours, inset = c(-0.1, 0))
+dev.off()
+```
+
+# add "chr" to Pol2 peaks fil to match current project
+```{r}
+pol2 <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/ChIP/170119_MV411_Pol2/Set1-4_S22_peaks.narrowPeak")
+
+pol2$V1 <- paste0("chr", pol2$V1)
+write.table(
+  pol2,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/ChIP/170119_MV411_Pol2/Set1-4_S22_peaks.narrowPeak",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# find DNMT1 peaks witihn 150bp (~histone) of Pol2, run closest first to get distance 
+```{bash}
+module load bedtools/2.27.1 
+
+pol2=/scratch/teams/dawson_genomics/Projects/DNMTi/ChIP/170119_MV411_Pol2/Set1-4_S22_peaks.narrowPeak
+
+bedtools closest -d -t first -a gNT_0nm_DNMT1_peaks.bed -b $pol2 > gNT_0nm_DNMT1_Pol2.bed
+bedtools closest -d -t first -a gNT_100nm_DNMT1_peaks.bed -b $pol2 > gNT_100nm_DNMT1_Pol2.bed
+bedtools closest -d -t first -a gRNF4_0nm_DNMT1_peaks.bed -b $pol2 > gRNF4_0nm_DNMT1_Pol2.bed
+bedtools closest -d -t first -a gRNF4_100nm_DNMT1_peaks.bed -b $pol2 > gRNF4_100nm_DNMT1_Pol2.bed
+```
+
+# make a table of DNMT1 peaks
+```{r}
+peak.beds <- list.files(bed.dir, pattern = "_DNMT1_peaks.bed", full.names = TRUE)
+
+pol2.table <- as.data.frame(matrix(nrow = 5, ncol = 0))
+for(peak.bed in peak.beds){
+  sample.peaks <- fread(peak.bed)
+  sname <- gsub("_peaks.bed", "", basename(peak.bed))
+  total.peaks <- nrow(sample.peaks)
+  pol2.bed <- fread(file.path(bed.dir, paste0(sname, "_Pol2.bed")))
+  overlap <- sum(pol2.bed$V15 == 0)
+  overlap.prop <- overlap/total.peaks
+  histone <- sum(pol2.bed$V15 > 0 & pol2.bed$V15 <= 150)
+  histone.prop <- histone/total.peaks
+  pol2.table[[sname]] <- rbind(total.peaks, overlap, overlap.prop, histone, histone.prop)
+}
+
+rownames(pol2.table) <- c("TotalPeaks", "OverlapWithPol2", "ProportionOverlap", "Within150bpPol2", "Proportion150bp")
+write.table(
+  pol2.table,
+  file.path(project.dir, "results/DNMT1_Pol2_colocal_table.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+  )
+```
+
+
+# same analysis as above with Pol2 from C&R data
+# add "chr" to Pol2 peaks fil to match current project
+# first run on narrow.all.frag but very low # of peaks so checking braod as well, still not great so checking SEACR
+```{r}
+cnr.pol2 <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/CUTandRUN/220519_NB501056_0802_AH3WTMBGXM/cnrt_wd/seacr.aug12.all.frag/BL02-CUTRUN-gNT-DMSO-POL2_S9_aligned_reads_treat.stringent.sort.bed")
+
+cnr.pol2$V1 <- paste0("chr", cnr.pol2$V1)
+write.table(
+  cnr.pol2,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/CUTandRUN/220519_NB501056_0802_AH3WTMBGXM/cnrt_wd/seacr.aug12.all.frag/BL02-CUTRUN-gNT-DMSO-POL2_S9_aligned_reads_treat.stringent.sort.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# get distance to nearest
+```{bash}
+module load bedtools/2.27.1 
+
+cnr_pol2=/scratch/teams/dawson_genomics/Projects/DNMTi/CUTandRUN/220519_NB501056_0802_AH3WTMBGXM/cnrt_wd/seacr.aug12.all.frag/BL02-CUTRUN-gNT-DMSO-POL2_S9_aligned_reads_treat.stringent.sort.bed
+
+bedtools closest -d -t first -a gNT_0nm_DNMT1_peaks.bed -b $cnr_pol2 > gNT_0nm_DNMT1_CnR_Pol2.bed
+bedtools closest -d -t first -a gNT_100nm_DNMT1_peaks.bed -b $cnr_pol2 > gNT_100nm_DNMT1_CnR_Pol2.bed
+bedtools closest -d -t first -a gRNF4_0nm_DNMT1_peaks.bed -b $cnr_pol2 > gRNF4_0nm_DNMT1_CnR_Pol2.bed
+bedtools closest -d -t first -a gRNF4_100nm_DNMT1_peaks.bed -b $cnr_pol2 > gRNF4_100nm_DNMT1_CnR_Pol2.bed
+```
+
+# make a table of DNMT1 peaks
+```{r}
+cnr.pol2.table <- as.data.frame(matrix(nrow = 5, ncol = 0))
+for(peak.bed in peak.beds){
+  sample.peaks <- fread(peak.bed)
+  sname <- gsub("_peaks.bed", "", basename(peak.bed))
+  total.peaks <- nrow(sample.peaks)
+  cnr.pol2.bed <- fread(file.path(bed.dir, paste0(sname, "_CnR_Pol2.bed")))
+  overlap <- sum(cnr.pol2.bed$V11 == 0)
+  overlap.prop <- overlap/total.peaks
+  histone <- sum(cnr.pol2.bed$V11 > 0 & cnr.pol2.bed$V11 <= 150)
+  histone.prop <- histone/total.peaks
+  cnr.pol2.table[[sname]] <- rbind(total.peaks, overlap, overlap.prop, histone, histone.prop)
+}
+
+rownames(cnr.pol2.table) <- c("TotalPeaks", "OverlapWithPol2", "ProportionOverlap", "Within150bpPol2", "Proportion150bp")
+write.table(
+  cnr.pol2.table,
+  file.path(project.dir, "results/DNMT1_CnR_Pol2_colocal_table.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+  )
+```
+
+# make new fig1 heatmaps, DNMT1 and H3K27ac genomic region heatmaps gNT samples only, ordered by DNMT1 binding
+```{bash}
+# submit new heatmap script for DNMT1
+sbatch scripts/DTMat_GeneRegion_all_DNMTi_ordered.sbatch 
+
+# same as above but sorted by sum
+sbatch scripts/DTMat_GeneRegion_all_DNMTi_sumSorted.sbatch
+
+# also make a cluster hm w/2 clusters
+sbatch scripts/DTMat_GeneRegion_all_DNMTi_sumSorted_kmeans2.sbatch
+
+# get RPGC norm BWs for H3K27ac samples
+for bam in bam/H3K27Ac_ChIP*bam
+do
+sbatch scripts/BamCov.sbatch $bam
+done
+
+# now make same heatmap as above for H3K27ac samples
+sbatch scripts/DTMat_GeneRegion_all_DNMTi_ordered_H3K27ac.sbatch 
+```
+
+# also make heatmap above ordered by CpG density, start by getting # of CGIs in each gene
+```{r}
+# get CGI bed w/o chr
+cgi.bed <- fread("bed_files/CGI.bed")
+
+cgi.nochr <- cgi.bed
+cgi.nochr$V1 <- gsub("chr", "", cgi.nochr$V1)
+
+write.table(cgi.nochr, "bed_files/CGI_nochr.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+
+# make ens gene bed +/-2kbp
+ens.bed <- fread("/data/reference/dawson_labs/bed_files/Hg38/Hg38EnsGene.bed")
+
+ens.2k <- cbind(ens.bed$V1, ens.bed$V2-2000, ens.bed$V3+2000, ens.bed[,4:6])
+
+write.table(ens.2k, "bed_files/Hg38EnsGene_plusminus2k.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+```
+
+
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -c -wa -a bed_files/Hg38EnsGene_plusminus2k.bed -b bed_files/CGI_nochr.bed > bed_files/CGIs_per_gene_plusminus2k.bed
+```
+
+# get density of CGIs/length
+```{r}
+cgi.gene <- fread("bed_files/CGIs_per_gene_plusminus2k.bed")
+
+cgi.gene$V8 <- cgi.gene$V7/(cgi.gene$V3-cgi.gene$V2)
+# sort by cgi density
+cgi.gene <- cgi.gene[order(cgi.gene$V8, decreasing = TRUE),]
+# change coords back to true start/end
+cgi.gene$V2 <- cgi.gene$V2+2000
+cgi.gene$V3 <- cgi.gene$V3-2000
+
+options(scipen=10)
+write.table(cgi.gene, "bed_files/CGIs_per_gene_plusminus2k_density_ordered.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+options(scipen=0)
+```
+
+# submit script for CGi ordered heatmaps
+```{bash}
+sbatch scripts/DTMat_GeneRegion_all_DNMT1_CGIdensityOrdered.sbatch
+```
+
+# get bam of CGIs only then make DNMT1 ordered heatmap (this can be done interactively)
+```{bash}
+module load samtools/1.13
+module load deeptools/3.5.0
+
+samtools view -b -L bed_files/CGI_nochr.bed -o bam/DNMT1_ChIP_gNT_0nm_CGIonly.bam bam/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC.bam
+samtools view -b -L bed_files/CGI_nochr.bed -o bam/DNMT1_ChIP_gNT_100nm_CGIonly.bam bam/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG.bam
+
+samtools index bam/DNMT1_ChIP_gNT_0nm_CGIonly.bam
+samtools index bam/DNMT1_ChIP_gNT_100nm_CGIonly.bam
+
+# make bigwigs for CGI bams
+bamCoverage --bam bam/DNMT1_ChIP_gNT_0nm_CGIonly.bam -o bam/RPGCnorm_BW/DNMT1_ChIP_gNT_0nm_CGIonly.bw --binSize 20 --normalizeUsing RPGC --effectiveGenomeSize 2736124973
+bamCoverage --bam bam/DNMT1_ChIP_gNT_100nm_CGIonly.bam -o bam/RPGCnorm_BW/DNMT1_ChIP_gNT_100nm_CGIonly.bw --binSize 20 --normalizeUsing RPGC --effectiveGenomeSize 2736124973
+
+# submit new heatmap
+sbatch script/DTMat_GeneRegion_all_DNMT1_sumSorted_CGIonly.sbatch
+```
+
+# also make heatmap of intergenic regions
+```{bash}
+sbatch scripts/DTMat_intergenic_all_DNMT1_sumSorted.sbatch
+```
+
+# make new reference Hg38 bed file 
+```{r}
+library(limma)
+hg38.gtf <- fread("/data/reference/dawson_labs/genomes/Hg38/Homo_sapiens.GRCh38.102.gtf")
+
+hg38.gene <- subset(hg38.gtf, V3 == "gene" & V2 != "mirbase")
+gene.data <- strsplit2(hg38.gene$V9, ";")
+gene.name <- gsub(" ", "", gsub("\"", "", gsub("gene_name ", "", gene.data[, 3])))
+hg38.bed <- hg38.gene[, c(1, 4, 5, 6, 7)]
+hg38.bed <- cbind(hg38.bed[,1:3], gene.name, hg38.bed[,4:5])
+
+options(scipen=10)
+write.table(hg38.bed, "bed_files/Homo_sapiens.GRCh38.102.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+options(scipen=0)
+```
+
+# make bed files for each cluster to send to Brian
+```{r}
+kmeans3 <- fread("bed_files/GR_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed")
+
+clust1 <- subset(kmeans3, deepTools_group == "cluster_1")
+clust2 <- subset(kmeans3, deepTools_group == "cluster_2")
+clust3 <- subset(kmeans3, deepTools_group == "cluster_3")
+
+options(scipen = 10)
+write.table(clust1, "bed_files/GR_whitelist_DNMT1_sumSortedRegions_cluster1.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+write.table(clust2, "bed_files/GR_whitelist_DNMT1_sumSortedRegions_cluster2.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+write.table(clust3, "bed_files/GR_whitelist_DNMT1_sumSortedRegions_cluster3.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+options(scipen = 0)
+```
+
+# make covariates annotation of CGI promoters in 3 clusters
+# get clusters which have promoters
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -wa -c -a bed_files/GR_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed -b bed_files/CGI_nochr.bed > bed_files/CGIprom_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed
+```
+
+```{r}
+cgi.km3 <- fread("bed_files/CGIprom_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed")
+
+all.km3.cgi <- merge(kmeans3, cgi.km3, by.x = c("#chrom", "start", "end"), by.y = c("V1", "V2", "V3"), sort = FALSE, all.x = TRUE, no.dups = TRUE)
+
+all.km3.cgi <- unique(all.km3.cgi[,1:4])
+```
+
+# get some stats for each cluster
+```{r}
+library(dplyr)
+library(biomaRt)
+
+med.size <- c(median(clust1$end - clust1$start), median(clust2$end - clust2$start), median(clust3$end - clust3$start))
+cgi.percent <- cgi.km3 %>% group_by(V13) %>% summarize(CGI = length(which(V14 > 0))/length(V14))
+clust.stats <- cbind(cgi.percent, med.size)
+
+# get expression quartiles from rnaseq data
+exp.qs <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Results/expression_quartiles.txt")
+# get gene symbols to ensembl
+Hsensembl=useMart(
+  host = "https://asia.ensembl.org", 
+  biomart = "ENSEMBL_MART_ENSEMBL",
+  dataset = "hsapiens_gene_ensembl"
+  )
+
+hg.ann = getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"), 
+  mart = Hsensembl,
+  uniqueRows = TRUE
+  )
+
+# write out BMann for future usage
+write.table(
+  hg.ann,
+  "/data/reference/dawson_labs/biomart_annotations/Hsapiens/ensembl_hgnc_entrez.txt",
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# add hgnc symbols to quartile data
+qs.ann <- merge(hg.ann, exp.qs, by.x = "ensembl_gene_id", by.y = "V1")
+# merge quartile data with cluster data
+clust1.qs <- merge(clust1, qs.ann, by.x = "name", by.y = "hgnc_symbol")
+clust2.qs <- merge(clust2, qs.ann, by.x = "name", by.y = "hgnc_symbol")
+clust3.qs <- merge(clust3, qs.ann, by.x = "name", by.y = "hgnc_symbol")
+clust.stats$Q1 <- c(sum(clust1.qs$quartile == "Q1")/nrow(clust1), sum(clust2.qs$quartile == "Q1")/nrow(clust2), sum(clust3.qs$quartile == "Q1")/nrow(clust3))
+clust.stats$Q2 <- c(sum(clust1.qs$quartile == "Q2")/nrow(clust1), sum(clust2.qs$quartile == "Q2")/nrow(clust2), sum(clust3.qs$quartile == "Q2")/nrow(clust3))
+clust.stats$Q3 <- c(sum(clust1.qs$quartile == "Q3")/nrow(clust1), sum(clust2.qs$quartile == "Q3")/nrow(clust2), sum(clust3.qs$quartile == "Q3")/nrow(clust3))
+clust.stats$Q4 <- c(sum(clust1.qs$quartile == "Q4")/nrow(clust1), sum(clust2.qs$quartile == "Q4")/nrow(clust2), sum(clust3.qs$quartile == "Q4")/nrow(clust3))
+clust.stats$no.expression <- 1-rowSums(clust.stats[,4:7])
+
+colnames(clust.stats) <- c("cluster", "CGI.proportion", "median.size", "proportion.Q1", "proportion.Q2", "proportion.Q3", "prorpotion.Q4", "no.expression.proportion")
+
+write.table(
+  clust.stats,
+  file.path(project.dir, "results/3cluster_stats.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+  )
+```
+
+# make separate bed files for each expression quartile in each cluster to make quartile separated heatmaps for each cluster
+```{r}
+clust1.q1 <- clust1.qs[which(clust1.qs$quartile == "Q1"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust1.q2 <- clust1.qs[which(clust1.qs$quartile == "Q2"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust1.q3 <- clust1.qs[which(clust1.qs$quartile == "Q3"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust1.q4 <- clust1.qs[which(clust1.qs$quartile == "Q4"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+
+clust2.q1 <- clust2.qs[which(clust2.qs$quartile == "Q1"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust2.q2 <- clust2.qs[which(clust2.qs$quartile == "Q2"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust2.q3 <- clust2.qs[which(clust2.qs$quartile == "Q3"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust2.q4 <- clust2.qs[which(clust2.qs$quartile == "Q4"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+
+clust3.q1 <- clust3.qs[which(clust3.qs$quartile == "Q1"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust3.q2 <- clust3.qs[which(clust3.qs$quartile == "Q2"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust3.q3 <- clust3.qs[which(clust3.qs$quartile == "Q3"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+clust3.q4 <- clust3.qs[which(clust3.qs$quartile == "Q4"), c(2, 3, 4, 1, 5, 6, 17, 14)]
+
+bed.files <- list(list(clust1.q1, clust1.q2, clust1.q3, clust1.q4), list(clust2.q1, clust2.q2, clust2.q3, clust2.q4), list(clust3.q1, clust3.q2, clust3.q3, clust3.q4))
+
+for(i in 1:length(bed.files)){
+  for(j in 1:length(bed.files[[i]])){
+    write.table(
+      bed.files[[i]][[j]],
+      file.path(bed.dir, paste0("cluster", i, "_Q", j, ".bed")), 
+      sep = "\t",
+      col.names = FALSE,
+      row.names = FALSE,
+      quote = FALSE
+    )
+  }
+}
+```
+
+# submit new cluster quartile heatmaps
+```{bash}
+sbatch scripts/DTMat_GeneRegion_whitelist_DNMT1_sumSorted_cluster1_quartiles.sbatch
+sbatch scripts/DTMat_GeneRegion_whitelist_DNMT1_sumSorted_cluster2_quartiles.sbatch
+sbatch scripts/DTMat_GeneRegion_whitelist_DNMT1_sumSorted_cluster3_quartiles.sbatch
+```
+
+# make new heatmaps of CGI DNMT1 peaks sorted and grouped by Me, control Me and drug Me
+```{bash}
+sbatch scripts/DTMat_CGI_DNMT1_Me_ordered_3groups.sbatch
+sbatch scripts/DTMat_CGI_DNMT1_drug_Me_ordered_3groups.sbatch
+```
+
+# add mean proportion of CGIs to cluster stats
+# first need number of bp overlap for each intersect
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -wao -a bed_files/GR_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed -b bed_files/CGI_nochr.bed > bed_files/CGIprom_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed
+```
+
+# now calculate total bp of CGIs over total region length
+```{r}
+km3.cgi.bp <- fread("bed_files/CGIprom_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed")
+cgi.prop.gene <- km3.cgi.bp %>% group_by(V4) %>% mutate(CGI.bp = sum(V17)) %>% mutate(CGI.prop = CGI.bp/(V3-V2))
+cgi.prop.clust <- cgi.prop.gene %>% group_by(V13) %>% summarize(mean.CGI.prop = mean(CGI.prop), min.CGI.prop = min(CGI.prop), max.CGI.prop = max(CGI.prop))
+
+# add to stats table and write out
+clust.stats$mean.bp.CGI.proportion <- cgi.prop.clust$mean.CGI.prop
+write.table(
+  clust.stats,
+  file.path(project.dir, "results/3cluster_stats.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+  )
+```
+
+# make enrichr plots for genes in each cluster
+```{r}
+library(enrichR)
+
+dbs <- c("GO_Molecular_Function_2021", "GO_Cellular_Component_2021", "GO_Biological_Process_2021", "Human_Gene_Atlas", "MSigDB_Hallmark_2020", "KEGG_2021_Human", "NCI-Nature_2015", "GTEx_Tissues_V8_2023", "WikiPathway_2021_Human", "RNAseq_Automatic_GEO_Signatures_Human_Up", "RNAseq_Automatic_GEO_Signatures_Human_Down")
+
+# limit to top 1000 genes in each cluster to limit confounding
+c1.genes <- kmeans3$name[which(kmeans3$deepTools_group == "cluster_1")]
+c1.enrich <- enrichr(c1.genes[1:1000], dbs)
+pdf(file.path(project.dir, "plots/enrichR/cluster1_enrichR_plots.pdf"), height = 8, width = 10)
+plotEnrich(c1.enrich[[1]], numChar = 65, title = names(c1.enrich)[[1]])
+plotEnrich(c1.enrich[[2]], numChar = 65, title = names(c1.enrich)[[2]])
+plotEnrich(c1.enrich[[3]], numChar = 65, title = names(c1.enrich)[[3]])
+plotEnrich(c1.enrich[[4]], numChar = 65, title = names(c1.enrich)[[4]])
+plotEnrich(c1.enrich[[5]], numChar = 65, title = names(c1.enrich)[[5]])
+plotEnrich(c1.enrich[[6]], numChar = 65, title = names(c1.enrich)[[6]])
+plotEnrich(c1.enrich[[7]], numChar = 65, title = names(c1.enrich)[[7]])
+plotEnrich(c1.enrich[[8]], numChar = 65, title = names(c1.enrich)[[8]])
+plotEnrich(c1.enrich[[9]], numChar = 65, title = names(c1.enrich)[[9]])
+plotEnrich(c1.enrich[[10]], numChar = 65, title = names(c1.enrich)[[10]])
+plotEnrich(c1.enrich[[11]], numChar = 65, title = names(c1.enrich)[[11]])
+dev.off()
+
+c2.genes <- kmeans3$name[which(kmeans3$deepTools_group == "cluster_2")]
+c2.enrich <- enrichr(c2.genes[1:1000], dbs)
+pdf(file.path(project.dir, "plots/enrichR/cluster2_enrichR_plots.pdf"), height = 8, width = 10)
+plotEnrich(c2.enrich[[1]], numChar = 65, title = names(c2.enrich)[[1]])
+plotEnrich(c2.enrich[[2]], numChar = 65, title = names(c2.enrich)[[2]])
+plotEnrich(c2.enrich[[3]], numChar = 65, title = names(c2.enrich)[[3]])
+plotEnrich(c2.enrich[[4]], numChar = 65, title = names(c2.enrich)[[4]])
+plotEnrich(c2.enrich[[5]], numChar = 65, title = names(c2.enrich)[[5]])
+plotEnrich(c2.enrich[[6]], numChar = 65, title = names(c2.enrich)[[6]])
+plotEnrich(c2.enrich[[7]], numChar = 65, title = names(c2.enrich)[[7]])
+plotEnrich(c2.enrich[[8]], numChar = 65, title = names(c2.enrich)[[8]])
+plotEnrich(c2.enrich[[9]], numChar = 65, title = names(c2.enrich)[[9]])
+plotEnrich(c2.enrich[[10]], numChar = 65, title = names(c2.enrich)[[10]])
+plotEnrich(c2.enrich[[11]], numChar = 65, title = names(c2.enrich)[[11]])
+dev.off()
+
+c3.genes <- kmeans3$name[which(kmeans3$deepTools_group == "cluster_3")]
+c3.enrich <- enrichr(c3.genes[1:1000], dbs)
+pdf(file.path(project.dir, "plots/enrichR/cluster3_enrichR_plots.pdf"), height = 8, width = 10)
+plotEnrich(c3.enrich[[1]], numChar = 65, title = names(c3.enrich)[[1]])
+plotEnrich(c3.enrich[[2]], numChar = 65, title = names(c3.enrich)[[2]])
+plotEnrich(c3.enrich[[3]], numChar = 65, title = names(c3.enrich)[[3]])
+plotEnrich(c3.enrich[[4]], numChar = 65, title = names(c3.enrich)[[4]])
+plotEnrich(c3.enrich[[5]], numChar = 65, title = names(c3.enrich)[[5]])
+plotEnrich(c3.enrich[[6]], numChar = 65, title = names(c3.enrich)[[6]])
+plotEnrich(c3.enrich[[7]], numChar = 65, title = names(c3.enrich)[[7]])
+plotEnrich(c3.enrich[[8]], numChar = 65, title = names(c3.enrich)[[8]])
+plotEnrich(c3.enrich[[9]], numChar = 65, title = names(c3.enrich)[[9]])
+plotEnrich(c3.enrich[[10]], numChar = 65, title = names(c3.enrich)[[10]])
+plotEnrich(c3.enrich[[11]], numChar = 65, title = names(c3.enrich)[[11]])
+dev.off()
+```
+
+# get proportion of DNMT1 peaks that overlap with CGI
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -u -a MACS/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC_peaks.bed -b bed_files/CGI.bed > bed_files/gNT_0nm_DNMT1_with_CGI_overlap.bed
+bedtools intersect -u -a MACS/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG_peaks.bed -b bed_files/CGI.bed > bed_files/gNT_100nm_DNMT1_with_CGI_overlap.bed
+
+wc -l bed_files/gNT_0nm_DNMT1_with_CGI_overlap.bed
+# 16259 bed_files/gNT_0nm_DNMT1_with_CGI_overlap.bed
+
+wc -l MACS/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC_peaks.bed
+# 82238 MACS/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC_peaks.bed
+16259/82238 = 0.1977067
+
+wc -l bed_files/gNT_100nm_DNMT1_with_CGI_overlap.bed
+# 16088 bed_files/gNT_100nm_DNMT1_with_CGI_overlap.bed
+
+wc -l MACS/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG_peaks.bed
+# 147494 MACS/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG_peaks.bed
+16088/147494 = 0.1090756
+```
+
+# redo heatmaps of CGI DNMT1 peaks sorted and grouped by Me with more stringent thresholds
+```{bash}
+sbatch scripts/DTMat_CGI_DNMT1_Me_ordered_3groups.sbatch
+sbatch scripts/DTMat_CGI_DNMT1_drug_Me_ordered_3groups.sbatch
+```
+
+# make heatmap of DNMT1 peaks ordered by openness of chromatin over LTRs
+```{bash}
+sbatch scripts/DTMat_LTR_ATACorder_DNMT1peaks.sbatch
+sbatch scripts/DTMat_LTR_ATACorder_gNT0_DNMT1peaks.sbatch
+```
+
+# make heatmap of K27 over TINATs
+```{bash}
+sbatch scripts/DTMat_realTINAT_expression_ordered_H3K27ac.sbatch
+```
+
+# convert strand format of peaks.bed files to be compatible with UCSC browser for publication submission
+```{r}
+peak.files <- list.files(file.path(project.dir, "MACS"), pattern = "_peaks.bed", full.names = TRUE)
+
+for(peak.file in peak.files){
+  p.file <- fread(peak.file)
+  p.file$V7 <- ifelse(p.file$V6 == 1, "+", "-")
+  p.file <- p.file[, -"V6"]
+  write.table(
+    p.file,
+    gsub("_peaks.bed", "_peaks_UCSC.bed", peak.file),
+    sep = "\t", 
+    col.names = FALSE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+}
+```
+
+# make RPGC norm bigwigs of inputs to include in heatmaps
+```{bash}
+for bam in bam/Input*bam
+do
+sbatch scripts/BamCov.sbatch $bam
+done
+
+sbatch scripts/DTMat_CGI_DNMT1_ordered_input.sbatch
+```
+
+# make saf and get counts over CGI DNMT1 peaks as in fig 1 to make scatterplots
+```{r}
+dnmt.cgi.bed <- fread("bed_files/DNMT1_CGI.bed")
+dnmt.cgi.saf <- data.frame(
+  "GeneID" = paste0("peak_", 1:nrow(dnmt.cgi.bed)), 
+  "Chr" = dnmt.cgi.bed$V1, 
+  "Start" = dnmt.cgi.bed$V2, 
+  "End" = dnmt.cgi.bed$V3, 
+  "Strand" = "*"
+)
+bam.files <- list.files("bam", pattern = "^[ID].*[ACGT].bam$", full.names = TRUE)
+
+dnmt.cgi.counts <- featureCounts(
+  bam.files,
+  annot.ext = dnmt.cgi.saf,
+  isPairedEnd = TRUE,
+  requireBothEndsMapped = TRUE,
+  countChimericFragments = FALSE
+)
+colnames(dnmt.cgi.counts$counts) <- gsub("_H7K2TDSX2_[ACGT]{8}.bam", "", colnames(dnmt.cgi.counts$counts))
+dnmt.cgi.df <- as.data.frame(dnmt.cgi.counts$counts)
+
+# make scatterplot of DNMT1 v input for each condition
+ct <- cor.test(dnmt.cgi.df$Input_ChIP_gNT_0nm, dnmt.cgi.df$DNMT1_ChIP_gNT_0nm)
+pdf("plots/Scatterplot_DNMT1vInput_gNT_0nm.pdf")
+plot(
+  dnmt.cgi.df$Input_ChIP_gNT_0nm,
+  dnmt.cgi.df$DNMT1_ChIP_gNT_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 3700),
+  ylim = c(0, 3700),
+  xlab = "Input_ChIP_gNT_0nm",
+  ylab = "DNMT1_ChIP_gNT_0nm"
+  )
+abline(a = 0, b = 1, col = "red")
+text(2000, 3000, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2800, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(dnmt.cgi.df$Input_ChIP_gNT_100nm, dnmt.cgi.df$DNMT1_ChIP_gNT_100nm)
+pdf("plots/Scatterplot_DNMT1vInput_gNT_100nm.pdf")
+plot(
+  dnmt.cgi.df$Input_ChIP_gNT_100nm,
+  dnmt.cgi.df$DNMT1_ChIP_gNT_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 3700),
+  ylim = c(0, 3700),
+  xlab = "Input_ChIP_gNT_100nm",
+  ylab = "DNMT1_ChIP_gNT_100nm"
+  )
+abline(a = 0, b = 1, col = "red")
+text(2000, 3000, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2800, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(dnmt.cgi.df$Input_ChIP_gRNF4_0nm, dnmt.cgi.df$DNMT1_ChIP_gRNF4_0nm)
+pdf("plots/Scatterplot_DNMT1vInput_gRNF4_0nm.pdf")
+plot(
+  dnmt.cgi.df$Input_ChIP_gRNF4_0nm,
+  dnmt.cgi.df$DNMT1_ChIP_gRNF4_0nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 3700),
+  ylim = c(0, 3700),
+  xlab = "Input_ChIP_gRNF4_0nm",
+  ylab = "DNMT1_ChIP_gRNF4_0nm"
+  )
+abline(a = 0, b = 1, col = "red")
+text(2000, 3000, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2800, paste0("p <= ", ct$p.value))
+dev.off()
+
+ct <- cor.test(dnmt.cgi.df$Input_ChIP_gRNF4_100nm, dnmt.cgi.df$DNMT1_ChIP_gRNF4_100nm)
+pdf("plots/Scatterplot_DNMT1vInput_gRNF4_100nm.pdf")
+plot(
+  dnmt.cgi.df$Input_ChIP_gRNF4_100nm,
+  dnmt.cgi.df$DNMT1_ChIP_gRNF4_100nm, 
+  col = rgb(0.4,0.4,0.8,0.6),
+  xlim = c(0, 3700),
+  ylim = c(0, 3700),
+  xlab = "Input_ChIP_gRNF4_100nm",
+  ylab = "DNMT1_ChIP_gRNF4_100nm"
+  )
+abline(a = 0, b = 1, col = "red")
+text(2000, 3000, paste0("R = ", round(ct$estimate, 4)))
+text(2000, 2800, paste0("p <= ", ct$p.value))
+dev.off()
+```
+
+# make heatmap of DNMT1i only to get bed file of peaks ordered by this sample
+```{bash}
+sbatch scripts/DTMat_CGI_DNMT1ionly_ordered.sbatch
+```
+
+# make spark plots for other example genes for Fig 1f
+```{bash}
+# needs to be run in
+
+# need to use python 3.11 for numpy
+module purge
+module load python/3.11.7-gcc-13.2.0
+module load samtools/1.19.2-gcc-13.2.0
+spack load py-numpy@1.26.4
+
+# look at examples from Powerpoint, first is POLR2I
+# start with this chip data
+python ~/SparK/SparK.py \
+  -pr chr19:36112440-36116482 \
+  -cf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC.sort.bdg \
+  -tf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG.sort.bdg \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ChIP_POLR2I
+  
+# now RNAseq
+python ~/SparK/SparK.py \
+  -pr chr19:36112440-36116482 \
+  -cf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-0nM-d7_ngm_filtered.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-100nM-d7_ngm_filtered.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_RNAseq_POLR2I
+  
+# and ATACseq
+python ~/SparK/SparK.py \
+  -pr chr19:36112440-36116482 \
+  -cf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-0nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-100nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ATACseq_POLR2I
+  
+# also have a look at TIMM13
+python ~/SparK/SparK.py \
+  -pr chr19:2425468-2427839 \
+  -cf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC.sort.bdg \
+  -tf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG.sort.bdg \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ChIP_TIMM13
+  
+python ~/SparK/SparK.py \
+  -pr chr19:2425468-2427839 \
+  -cf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-0nM-d7_ngm_filtered.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-100nM-d7_ngm_filtered.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_RNAseq_TIMM13
+  
+python ~/SparK/SparK.py \
+  -pr chr19:2425468-2427839 \
+  -cf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-0nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-100nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ATACseq_TIMM13
+  
+# finally have a look at OAZ1
+python ~/SparK/SparK.py \
+  -pr chr19:2267457-2275542 \
+  -cf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_0nm_H7K2TDSX2_TACGCTGC.sort.bdg \
+  -tf /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/DNMT1_ChIP_gNT_100nm_H7K2TDSX2_ATGCGCAG.sort.bdg \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ChIP_OAZ1
+  
+python ~/SparK/SparK.py \
+  -pr chr19:2267457-2275542 \
+  -cf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-0nM-d7_ngm_filtered.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/BedGraph/gNT-100nM-d7_ngm_filtered.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_RNAseq_OAZ1
+  
+python ~/SparK/SparK.py \
+  -pr chr19:2267457-2275542 \
+  -cf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-0nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -tf /dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/BedGraph/gNT-100nM_merged_by_group_rmdup_sort_nMTnU_MAPQ.bdg.gz \
+  -gtf /data/reference/dawson_labs/genomes/GRCh38/gencode.v47.annotation.gtf \
+  -l Vehicle DNMT1i \
+  -gs yes \
+  -f 9AC4F6 004487 \
+  -o /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/plots/browserPlot_ATACseq_OAZ1
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_ChIPseq_2105.txt"))
+)
+```
