@@ -1,0 +1,315 @@
+---
+title: "MassSpec_Analysis"
+author: "Andrea"
+date: '2022-11-11'
+output: html_document
+---
+
+
+# Analysis of differential Mass spec from data from table provided by Brian
+
+# load libraries and set paths
+```{r}
+library(DEP)
+library(DEqMS)
+library(edgeR)
+library(data.table)
+library(dplyr)
+library(matrixStats)
+library(qvalue)
+library(EnhancedVolcano)
+
+scratch.dir <- "/scratch/teams/dawson_genomics/Projects/DNMTi/MassSpec"
+plots.dir <- file.path(scratch.dir, "plots")
+results.dir <- file.path(scratch.dir, "results")
+data.dir <- file.path(scratch.dir, "data")
+```
+
+# using data already run through FragPipe software, t-test group comparisons and then B-H correct did not yield any sig
+```{r}
+ms.data <- read.table(file.path(data.dir, "DNMT1i_MS_Proteomics.txt"), row.names = 1, header = TRUE)
+
+# get qvalues for each comparison
+ms.data$NT_DNMT1ivDMSO_Qvalue <- (qvalue(ms.data$NT_DNMT1ivDMSO_Pvalue))$qvalues
+ms.data$DMSO_NTvRNF4_Qvalue <- (qvalue(ms.data$DMSO_NTvRNF4_Pvalue))$qvalues
+ms.data$DNMTi_RNF4vNT_Qvalue <- (qvalue(ms.data$DNMTi_RNF4vNT_Pvalue))$qvalues
+
+# no significant q-values, so just make volcanoes with LFC and P
+pdf(file.path(plots.dir, "NT_DNMT1ivDMSO_MassSpec_volcano.pdf"))
+EnhancedVolcano(ms.data,
+    lab = rownames(ms.data),
+    x = 'NT_DNMT1ivDMSO_LFC',
+    y = 'NT_DNMT1ivDMSO_Pvalue',
+    selectLab = c('DNMT1'),
+    title = 'NT_DNMT1ivDMSO',
+    cutoffLineType = "solid",
+    pCutoff = 0.0000073637702504,
+    FCcutoff = 2,
+    drawConnectors = TRUE,
+    arrowheads = FALSE,
+    col = c("grey30", "grey30", "grey30", "red2"),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE
+    )
+dev.off()
+
+pdf(file.path(plots.dir, "DMSO_RNF4vNT_MassSpec_volcano.pdf"))
+EnhancedVolcano(ms.data,
+    lab = rownames(ms.data),
+    x = 'DMSO_RNF4vNT_LFC',
+    y = 'DMSO_RNF4vNT_Pvalue',
+    selectLab = c('DNMT1'),
+    title = "DMSO_RNF4vNT",
+    cutoffLineType = "solid",
+    pCutoff = 0.0000073637702504,
+    FCcutoff = 2,
+    drawConnectors = TRUE,
+    arrowheads = FALSE,
+    col = c("grey30", "grey30", "grey30", "red2"),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE
+    )
+dev.off()
+
+pdf(file.path(plots.dir, "DNMTi_RNF4vNT_MassSpec_volcano.pdf"))
+EnhancedVolcano(ms.data,
+    lab = rownames(ms.data),
+    x = 'DNMTi_RNF4vNT_LFC',
+    y = 'DNMTi_RNF4vNT_Pvalue',
+    selectLab = c('DNMT1'),
+    title = "DNMTi_RNF4vNT",
+    cutoffLineType = "solid",
+    pCutoff = 0.0000073637702504,
+    FCcutoff = 2,
+    drawConnectors = TRUE,
+    arrowheads = FALSE,
+    col = c("grey30", "grey30", "grey30", "red2"),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE
+    )
+dev.off()
+```
+
+
+
+
+
+
+
+
+######## deprecated as this bit was not useful
+
+# First try analysis with DEP package: load data into R, make sample ann, and make SE obj
+```{r}
+ms.data <- fread(file.path(data.dir, "DNMT1i_MS_Proteomics.txt"))
+
+sample.ann <- data.frame(
+  label = colnames(ms.data)[2:13],
+  condition = c(rep("NT_DMSO", 3), rep("NT_DNMT1i", 3), rep("RNF4_DMSO",3), rep("RNF4_DNMT1i", 3)),
+  replicate = rep(1:3, 4)
+)
+
+ms.data$ID <- ""
+data_unique <- make_unique(ms.data, "Gene", "ID")
+se.data <- make_se(data_unique, 2:13, sample.ann)
+
+plot_frequency(se.data)
+
+# lots of 0s, filter for proteins that are in 2 of 3 replicates for at least 1 condition
+#data.filt <- filter_missval(se.data, thr = 1)
+#data.norm <- normalize_vsn(se.data)
+#plot_normalization(se.data, data.norm)
+```
+
+# differential enrichment analysis
+```{r}
+data.diff <- test_diff(se.data, type = "manual", test = c("NT_DNMT1i_vs_NT_DMSO", "NT_DMSO_vs_RNF4_DMSO", "RNF4_DNMT1i_vs_NT_DNMT1i"))
+dep <- add_rejections(data.diff, alpha = 0.05, lfc = log2(0.58))
+
+plot_pca(dep, x = 1, y = 2, point_size = 4)
+plot_cor(dep, significant = FALSE, lower = 0, upper = 1, pal = "Reds")
+plot_volcano(dep, contrast = "NT_DNMT1i_vs_NT_DMSO", label_size = 2, add_names = TRUE)
+```
+
+# correlations stronger by replicate in above analysis and nothing significant, trying a different tool
+# trying DEqMS tool 
+# collate raw data and PSM values then make edger object
+```{r}
+# load counts 
+ms.raw <- read.table(file.path(data.dir, "MS_Raw.txt"), row.names = 1, header = TRUE)
+ms.raw <- equalMedianNormalization(ms.raw)
+# load psms and append to counts data separately
+psm1 <- fread(file.path(data.dir, "PSM_rep1.txt"))
+colnames(psm1)[2:5] <- paste0("PSM_", colnames(psm1)[2:5])
+psm2 <- fread(file.path(data.dir, "PSM_rep2.txt"))
+colnames(psm2)[2:5] <- paste0("PSM_", colnames(psm2)[2:5])
+psm3 <- fread(file.path(data.dir, "PSM_rep3.txt"))
+colnames(psm3)[2:5] <- paste0("PSM_", colnames(psm3)[2:5])
+ms.psm <- cbind(ms.raw, "Gene" = rownames(ms.raw))
+ms.psm <- merge(ms.psm, psm1)
+
+counts = DGEList(
+  dnmt.ms, 
+  group = sample.ann$condition
+  )
+```
+
+
+# set design and contrasts for DE
+```{r}
+# design table
+design = model.matrix(~0+group, data = counts$samples)
+colnames(design) <- gsub("group", colnames(design), replacement = "")
+design
+
+contr.matrix <- makeContrasts(
+  NT_DNMT1ivDMSO = NT_DNMT1i-NT_DMSO,
+  DMSO_NTvRNF4 = NT_DMSO-RNF4_DMSO,
+  DNMTi_RNF4vNT = RNF4_DNMT1i-NT_DNMT1i,
+  levels = colnames(design)
+  )
+contr.matrix
+```
+
+# limma model fitting
+```{r}
+fit1 <- lmFit(dnmt.ms, design)
+fit2 <- contrasts.fit(fit1, contrasts = contr.matrix)
+fit3 <- eBayes(fit2)
+```
+
+# DEqMS correction of bias of variance estimate
+```{r}
+
+```
+
+
+######## deprecated as this bit was not useful
+# estimate dispersion
+```{r}
+d_counts = estimateDisp(counts, design)
+```
+
+# check out voom analysis first
+```{r}
+v_counts = voom(d_counts, design, plot = T)
+vfit_counts <- lmFit(v_counts, design)
+vfit_counts <- contrasts.fit(vfit_counts, contrasts = contr.matrix)
+efit_counts <- eBayes(vfit_counts)
+pdf(file.path(plots.dir, "SAplot_norm_counts.pdf"))
+plotSA(efit_counts)
+dev.off()
+```
+
+
+# Summary of contrasts
+```{r}
+summary(decideTests(efit_counts))
+```
+
+# Summary of contrasts with logFC greater than 0.58 (FC 1.5)
+```{r}
+tfit_counts <- treat(vfit_counts, lfc = 0.58)
+dt_counts <- decideTests(tfit_counts)
+summary(dt_counts)
+```
+
+# DE genes
+```{r}
+# initialise list
+contrast.list <- list()
+
+#set and make DE dir
+de.dir <- file.path(results.dir, "DE")
+dir.create(de.dir)
+voom.dir <- file.path(de.dir, "voom")
+dir.create(voom.dir)
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  contrast.list[[contrast.i]] <- topTreat(tfit_counts, coef = contrast.i, n=Inf)
+  contrast.list[[contrast.i]]$int_region <- rownames(contrast.list[[contrast.i]])
+  contrast.list[[contrast.i]] <- merge(int.bed, contrast.list[[contrast.i]],  by.x = "V4", by.y = "int_region")
+  colnames(contrast.list[[contrast.i]])[1:5] <- c("int_region", "chr", "start", "end", "strand")
+  write.table(
+    contrast.list[[contrast.i]],
+    file.path(voom.dir, paste0(colnames(contr.matrix)[[contrast.i]], "_counts_DEtable.txt")),
+    sep = "\t",
+    quote = F,
+    row.names = F,
+    col.names = T
+    )
+}
+
+names(contrast.list) <- colnames(contr.matrix)
+```
+
+# make and save MA plots
+```{r}
+voom.ma.dir <- file.path(plots.dir, "voom_MAplots")
+dir.create(voom.ma.dir)
+for(contrast.i in 1:length(contrast.list)){
+  pdf(file.path(voom.ma.dir, paste0(colnames(tfit_counts)[contrast.i], "_MAplot.pdf")))
+  plotMD(
+    tfit_counts, 
+    column = contrast.i, 
+    status = dt_counts[,contrast.i],
+    main = colnames(tfit_counts)[contrast.i]
+    )
+  dev.off()
+}
+```
+
+# also look at edgeR
+```{r}
+gfit_counts <- glmQLFit(d_counts, design)
+ftest.list <- list()
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+
+  ftest.list[[contrast.i]] <- glmQLFTest(gfit_counts, contrast = contr.matrix[ , contrast.i])
+  ftest.list[[contrast.i]]$table$ensg <- rownames(ftest.list[[contrast.i]]$table)
+  # write ftest table
+  write.table(
+    ftest.list[[contrast.i]]$table,
+    file.path(results.dir, paste0(colnames(contr.matrix)[contrast.i], "_ftest_table.txt")),
+    sep = "\t",
+    quote = F,
+    col.names = T,
+    row.names = F
+  )
+}
+
+# add names for referencing
+names(ftest.list) <- colnames(contr.matrix)
+```
+
+# MA plots
+```{r}
+edger.ma.dir <- file.path(plots.dir, "edger_MAplots")
+dir.create(edger.ma.dir)
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  pdf(file.path(edger.ma.dir, paste0(colnames(contr.matrix)[contrast.i], "_MAplot.pdf")))
+  maPlot(
+    logAbundance = ftest.list[[contrast.i]]$table$logCPM,
+    logFC = ftest.list[[contrast.i]]$table$logFC,
+    main = colnames(contr.matrix)[contrast.i],
+    xlab = expression(bold(paste("log"[2], " CPM"))),
+    ylab = expression(bold(paste("log"[2], " FC"))),
+    col = "black",
+    allCol ="red"
+  )
+  dev.off()
+}
+```
+
+
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(scratch.dir, "session-info", paste0(Sys.Date(), "_MassSpec_analysis_2211.txt"))
+)
+```
