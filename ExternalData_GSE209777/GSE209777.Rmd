@@ -1,0 +1,20 @@
+---
+title: "GSE209777"
+author: "Andrea"
+date: "2024-02-19"
+output: html_document
+---
+
+`# download fastqs from sra and split fastqs into reads (difficult to submit as job because of SRA config so run interactively)
+```{bash}
+sinteractive -p prod --mem 24G --time 2-00:00:00
+
+module load sratoolkit/3.0.0
+
+cd fastqs
+fastq-dump --split-3 --verbose SRR20649710 SRR20649711 SRR20649712 SRR20649713 SRR20649714 SRR20649715 SRR20649716 SRR20649717 SRR20649718 SRR20649719 SRR20649720 SRR20649721
+
+# compress after transfer (during is deprecated and not recommended)
+gzip *fastq
+```
+
