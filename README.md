@@ -18,3 +18,5 @@ ExternalData_AZA_DAC_CRISPR: This is conducting analysis on a table and MAGECK c
 ExternalData_GSE145639: These scripts analyse raw data (and subsequent analysis) downloaded from GEO published in Epigenetic therapy induces transcription of inverted SINEs and ADAR1 dependency, Nature 2020 https://www.nature.com/articles/s41586-020-2844-1 
 
 ExternalData_GSE209777: These scripts are analyzing raw data downloaded from GEO for RNAseq published in the TINPAT paper in Nat Com Oct 2023 https://www.nature.com/articles/s41467-023-42417-w
+
+MassSpec: This experiment was conducted and data processed externally; these scripts are just doing downstream analysis on provided tables.
