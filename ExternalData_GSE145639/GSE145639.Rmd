@@ -1,0 +1,202 @@
+---
+title: "GSE145639"
+author: "Andrea"
+date: '2022-07-04'
+output: html_document
+---
+
+# get count of intersect btw editing Alus bed files w/ MR.Gs
+```{bash}
+for bed in bed_files/Hg38*_Editing_Alus.bed.gz
+do
+sbatch scripts/intergenic_Alu_counts.sbatch $bed
+done
+```
+
+# compile table of TC reads, background, and % edited in table
+```{r}
+library(data.table)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/ExternalData/GSE145639"
+int.dir <- file.path(project.dir, "int_counts")
+sesh.dir <- file.path(project.dir, "session-info")
+
+ko.cdr <- fread(file.path(int.dir, "Hg38_MDA5-protected_ADAR1KD_5-AZA-CdR_intergenic_counts.txt"))
+colnames(ko.cdr) <- c("chr", "start", "end", "name", "strand", "ADAR1KD_5-AZA-CdR.edit.sites")
+ko.mock <- fread(file.path(int.dir, "Hg38_MDA5-protected_ADAR1KD_Mock-treated_intergenic_counts.txt"))
+all.counts <- merge(ko.cdr, ko.mock, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+wt.cdr <- fread(file.path(int.dir, "Hg38_MDA5-protected_ADAR1WT_5-AZA-CdR_intergenic_counts.txt"))
+all.counts <- merge(all.counts, wt.cdr, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+wt.mock <- fread(file.path(int.dir, "Hg38_MDA5-protected_ADAR1WT_Mock-treated_intergenic_counts.txt"))
+all.counts <- merge(all.counts, wt.mock, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+colnames(all.counts)[7:9] <- c("ADAR1KD_Mock-treated.edit.sites", "ADAR1WT_5-AZA-CdR.edit.sites", "ADAR1WT_Mock-treated.edit.sites")
+
+write.table(
+  all.counts,
+  file.path(int.dir, "intergenic_alu_edit_sites_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# download fastqs from sra and split fastqs into reads (difficult to submit as job because of SRA config)
+```{bash}
+module load sratoolkit/3.0.0
+
+cd fastqs
+fastq-dump --split-3 --verbose SRR11124010 SRR11124011 SRR11124012 SRR11124013 SRR11124018 SRR11124019 SRR11124020 SRR11124021
+
+# compress after transfer (during is deprecated and not recommended)
+gzip *fastq
+```
+
+# run fastqc on data downloaded from SRA
+```{bash}
+# run from GSE dir
+cd ..
+
+for fq in fastqs/*_1.fastq.gz
+do 
+sname=`basename $fq _1.fastq.gz`
+sbatch scripts/fastqc.sbatch $fq fastqs/${sname}_2.fastq.gz
+done
+
+# run multiqc to collate all raw fastqcs here
+module load multiqc/1.8
+multiqc -o fastqc fastqc
+```
+
+# run ngm with slamdunk settings on fastqs from SRA
+```{bash}
+for fq in fastqs/*_1.fastq.gz
+do
+sname=`basename $fq _1.fastq.gz`
+sbatch scripts/ngm_align_paired.sbatch $fq fastqs/${sname}_2.fastq.gz
+done
+
+# get multiqc of trimmed fastqc files
+multiqc -o trim_fastqc trim_fastqc
+```
+
+# merge replicate bams, from bams dir, and name with sample names instead of SRR#s then index
+```{bash}
+cd bams
+
+sbatch ../scripts/merge_bams.sbatch SRR11124010_ngm_filtered.bam SRR11124011_ngm_filtered.bam MDA5_Protected_ADAR1WT_MockTreated
+sbatch ../scripts/merge_bams.sbatch SRR11124012_ngm_filtered.bam SRR11124013_ngm_filtered.bam MDA5_Protected_ADAR1WT_5_AZA_CdR
+sbatch ../scripts/merge_bams.sbatch SRR11124018_ngm_filtered.bam SRR11124019_ngm_filtered.bam MDA5_Protected_ADAR1KD_MockTreated
+sbatch ../scripts/merge_bams.sbatch SRR11124020_ngm_filtered.bam SRR11124021_ngm_filtered.bam MDA5_Protected_ADAR1KD_5_AZA_CdR
+
+module load samtools/1.8
+
+samtools index MDA5_Protected_ADAR1KD_5_AZA_CdR_ngm_filtered.bam
+samtools index MDA5_Protected_ADAR1KD_MockTreated_ngm_filtered.bam
+samtools index MDA5_Protected_ADAR1WT_5_AZA_CdR_ngm_filtered.bam
+samtools index MDA5_Protected_ADAR1WT_MockTreated_ngm_filtered.bam
+```
+
+# not much seen in the filtered bams, also merge unfiltered bams and index
+```{bash}
+sbatch ../scripts/merge_bams.sbatch SRR11124010_ngm.bam SRR11124011_ngm.bam MDA5_Protected_ADAR1WT_MockTreated
+sbatch ../scripts/merge_bams.sbatch SRR11124012_ngm.bam SRR11124013_ngm.bam MDA5_Protected_ADAR1WT_5_AZA_CdR
+sbatch ../scripts/merge_bams.sbatch SRR11124018_ngm.bam SRR11124019_ngm.bam MDA5_Protected_ADAR1KD_MockTreated
+sbatch ../scripts/merge_bams.sbatch SRR11124020_ngm.bam SRR11124021_ngm.bam MDA5_Protected_ADAR1KD_5_AZA_CdR
+
+module load samtools/1.8
+
+samtools sort -o MDA5_Protected_ADAR1KD_5_AZA_CdR_ngm.sort.bam MDA5_Protected_ADAR1KD_5_AZA_CdR_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1KD_MockTreated_ngm.sort.bam MDA5_Protected_ADAR1KD_MockTreated_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1WT_5_AZA_CdR_ngm.sort.bam MDA5_Protected_ADAR1WT_5_AZA_CdR_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1WT_MockTreated_ngm.sort.bam MDA5_Protected_ADAR1WT_MockTreated_ngm.bam
+
+samtools index MDA5_Protected_ADAR1KD_5_AZA_CdR_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1KD_MockTreated_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1WT_5_AZA_CdR_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1WT_MockTreated_ngm.sort.bam
+```
+
+# get count of both bam versions w/ MR.Gs and add to table with edit sites
+```{bash}
+for bed in bams/MDA5_*_ngm.sort.bam
+do
+sbatch scripts/intergenic_Alu_counts.sbatch $bed
+done
+
+for bed in bams/MDA5_*_ngm_filtered.bam
+do
+sbatch scripts/intergenic_Alu_counts.sbatch $bed
+done
+```
+
+# use untrimmed reads due to so many reads being thrown out and poor quality
+# run ngm with slamdunk settings on fastqs from SRA
+```{bash}
+for fq in fastqs/*_1.fastq.gz
+do
+sname=`basename $fq _1.fastq.gz`
+sbatch scripts/ngm_align_paired.sbatch $fq fastqs/${sname}_2.fastq.gz
+done
+```
+
+# merge unfiltered untrimmed bams and index
+```{bash}
+cd bams
+sbatch ../scripts/merge_bams.sbatch SRR11124010_raw_ngm.bam SRR11124011_raw_ngm.bam MDA5_Protected_ADAR1WT_MockTreated_raw
+sbatch ../scripts/merge_bams.sbatch SRR11124012_raw_ngm.bam SRR11124013_raw_ngm.bam MDA5_Protected_ADAR1WT_5_AZA_CdR_raw
+sbatch ../scripts/merge_bams.sbatch SRR11124018_raw_ngm.bam SRR11124019_raw_ngm.bam MDA5_Protected_ADAR1KD_MockTreated_raw
+sbatch ../scripts/merge_bams.sbatch SRR11124020_raw_ngm.bam SRR11124021_raw_ngm.bam MDA5_Protected_ADAR1KD_5_AZA_CdR_raw
+
+module load samtools/1.8
+
+samtools sort -o MDA5_Protected_ADAR1KD_5_AZA_CdR_raw_ngm.sort.bam MDA5_Protected_ADAR1KD_5_AZA_CdR_raw_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1KD_MockTreated_raw_ngm.sort.bam MDA5_Protected_ADAR1KD_MockTreated_raw_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1WT_5_AZA_CdR_raw_ngm.sort.bam MDA5_Protected_ADAR1WT_5_AZA_CdR_raw_ngm.bam
+samtools sort -o MDA5_Protected_ADAR1WT_MockTreated_raw_ngm.sort.bam MDA5_Protected_ADAR1WT_MockTreated_raw_ngm.bam
+
+samtools index MDA5_Protected_ADAR1KD_5_AZA_CdR_raw_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1KD_MockTreated_raw_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1WT_5_AZA_CdR_raw_ngm.sort.bam
+samtools index MDA5_Protected_ADAR1WT_MockTreated_raw_ngm.sort.bam
+```
+
+# count reads from each bam at intergenic regions
+```{bash}
+for bed in bams/MDA5_*_raw_ngm.sort.bam
+do
+sbatch scripts/intergenic_Alu_counts.sbatch $bed
+done
+```
+
+# add bam counts to table
+```{r}
+ko.cdr <- fread(file.path(int.dir, "MDA5_Protected_ADAR1KD_5_AZA_CdR_raw_intergenic_counts.txt"))
+all.counts <- merge(all.counts, ko.cdr, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+ko.mock <- fread(file.path(int.dir, "MDA5_Protected_ADAR1KD_MockTreated_raw_intergenic_counts.txt"))
+all.counts <- merge(all.counts, ko.mock, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+wt.cdr <- fread(file.path(int.dir, "MDA5_Protected_ADAR1WT_5_AZA_CdR_raw_intergenic_counts.txt"))
+all.counts <- merge(all.counts, wt.cdr, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+wt.mock <- fread(file.path(int.dir, "MDA5_Protected_ADAR1WT_MockTreated_raw_intergenic_counts.txt"))
+all.counts <- merge(all.counts, wt.mock, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+colnames(all.counts)[6:13] <- c("KD_AZA_editSites", "KD_Mock_editSites", "WT_AZA_editSites", "WT_Mock_editSites", "KD_AZA_rawBamCounts", "KD_Mock_rawBamCounts", "WT_AZA_rawBamCounts", "WT_Mock_rawBamCounts")
+
+write.table(
+  all.counts,
+  file.path(int.dir, "intergenic_alu_counts_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+``` 
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_GSE145639_editing_analysis_2207.txt"))
+)
+```
