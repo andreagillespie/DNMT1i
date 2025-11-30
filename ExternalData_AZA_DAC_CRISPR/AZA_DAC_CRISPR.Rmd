@@ -1,0 +1,25 @@
+---
+title: "AZA_DAC_CRISPR"
+author: "Andrea"
+date: '2024-01-10'
+output: html_document
+---
+
+# load in data from external results and make rank plots w/ highlighted RNF4
+```{r}
+library(data.table)
+library(ggplot2)
+
+aza <- fread("AZA_v_T0_MAGECK.txt")
+gdac <- fread("GDAC_v_T0_MAGECK.txt")
+colnames(aza) <- gsub("\\|", "_", colnames(aza))
+colnames(gdac) <- gsub("\\|", "_", colnames(gdac))
+
+ggplot(aza) +
+  geom_point(aes(x = "pos_rank", y = "pos_lfc"))
+
+plot(rank(aza$pos_lfc), aza$pos_lfc)
+plot(rank(gdac$pos_lfc), gdac$pos_lfc)
+```
+
+
