@@ -1,0 +1,161 @@
+---
+title: "RNAseq_230105"
+author: "Andrea"
+date: '2023-01-11'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+
+Project directory: /scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/230105_NB501056_0904_AHT3M7BGXN
+
+fastq dir: /pipeline/Runs/NextSeq/230105_NB501056_0904_AHT3M7BGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/
+
+```{bash}
+# set up project dir
+cd /scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/
+
+mkdir 230105_NB501056_0904_AHT3M7BGXN
+cd 230105_NB501056_0904_AHT3M7BGXN
+
+mkdir fastqc
+mkdir scripts
+mkdir logs
+
+for fq in /pipeline/Runs/NextSeq/230105_NB501056_0904_AHT3M7BGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/fastqc.sbatch $fq 
+done
+
+# when fastqc is finished run multiqc 
+module load multiqc/1.8
+cd fastqc
+multiqc .
+cd ..
+```
+
+# align using ngm slam-seq settings as done for previous RNAseq
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/230105_NB501056_0904_AHT3M7BGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/ngm_align_paired_v043.sbatch $fq 
+done
+```
+
+# make TDFs
+```{bash}
+for bam in bams/*_sort_ngmRG_filtered.bam
+do
+sbatch scripts/toTDF.sbatch $bam
+done
+```
+
+# align as before but with dawson_lab reference genome rather than Naiara's, want to make sure this isn't causing issue with ngm indexing
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/230105_NB501056_0904_AHT3M7BGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/ngm_align_paired_new_ref.sbatch $fq 
+done
+```
+### this is fine, removing new ref dir as data not needed
+
+# count expression over repeat elements and quantify proportionally
+```{bash}
+# get total counts of each bam first
+module load samtools/1.13
+
+for bam in bams/*_sort_ngmRG_filtered.bam
+do
+echo $bam >> bams/bamstats.txt
+samtools flagstat $bam >> bams/bamstats.txt
+done
+```
+
+
+```{r}
+library(data.table)
+
+project.dir <- "/scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/230105_NB501056_0904_AHT3M7BGXN"
+session.dir <- file.path(project.dir, "session-info")
+rep.dir <- file.path(project.dir, "repeats_analysis")
+bam.dir <- file.path(project.dir, "bams")
+
+rm.bed <- "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/Hyper_editing/REDItools/bed_files/Hg38_RepeatMasker.bed"
+bams <- list.files(bam.dir, pattern = "_sort_ngmRG_filtered.bam$", full.names = TRUE)
+
+# loop through each bam to intersect with rm bed then collate into counts table 
+rm.table <- fread(rm.bed)
+for(bam in bams){
+  sname <- gsub("_sort_ngmRG_filtered.bam", "", basename(bam))
+  
+  out.file <- file.path(rep.dir, "bed_files", paste0(sname, "_RM_counts.bed"))
+  system(paste0("module load bedtools/2.27.1 ; bedtools intersect -wa -c -a ", rm.bed, " -b ", bam, " > ", out.file ))
+  rep.bed <- fread(out.file)
+  rm.table <- cbind(rm.table, rep.bed$V8)
+}
+
+colnames(rm.table) <- c("chr", "start", "end", "strand", "repName", "repClass", "repFamily", gsub("_sort_ngmRG_filtered.bam", "", basename(bams)))
+
+# reorder to place replicates next to each other
+rm.table <- rm.table[, c(1:8, 12, 9, 13, 10, 14, 11, 15)]
+
+# get counts for desired categories (as in Nature paper)
+alu.sum <- colSums(rm.table[which(rm.table$repFamily == "Alu"), 8:15])
+mir.sum <- colSums(rm.table[which(rm.table$repFamily == "MIR"), 8:15])
+line.sum <- colSums(rm.table[which(rm.table$repClass == "LINE"), 8:15])
+ltr.sum <- colSums(rm.table[which(rm.table$repClass == "LTR" | rm.table$repClass == "LTR?"), 8:15])
+small.sum <- colSums(rm.table[which(rm.table$repClass == "snRNA" | rm.table$repClass == "scRNA"), 8:15])
+other.sum <- colSums(rm.table[, 8:15]) - (alu.sum+mir.sum+line.sum+ltr.sum+small.sum)
+# from bamstats.txt (above)
+total.reads <- c(
+  "R1-DMSO-cytoplasm_S83" = 14897390, 
+  "R2-DMSO-cytoplasm_S84" = 17383380, 
+  "R1-DMSO-nuclear_S79" = 18965061, 
+  "R2-DMSO-nuclear_S80" = 20337848, 
+  "R1-DNMT1i-cytoplasm_S85" = 27028056, 
+  "R2-DNMT1i-cytoplasm_S86" = 19436381, 
+  "R1-DNMT1i-nuclear_S81" = 20399997, 
+  "R2-DNMT1i-nuclear_S82" = 20715955
+  )
+norep.sum <- total.reads - (alu.sum+mir.sum+line.sum+ltr.sum+small.sum+other.sum)
+
+# now proportions of each
+alu.prop <- alu.sum/total.reads
+mir.prop <- mir.sum/total.reads
+line.prop <- line.sum/total.reads
+ltr.prop <- ltr.sum/total.reads
+small.prop <- small.sum/total.reads
+other.prop <- other.sum/total.reads
+norep.prop <- norep.sum/total.reads
+
+# collate into table of all proportions
+rep.prop.table <- rbind(alu.prop, mir.prop, line.prop, ltr.prop, small.prop, other.prop, norep.prop)
+# convert to percent
+rep.prop.table <- rep.prop.table*100
+rownames(rep.prop.table) <- c("Alu", "MIR", "LINE", "LTR", "smallRNAs", "otherRepeats", "nonRepeats")
+
+write.table(
+  rep.prop.table,
+  file.path(rep.dir, "Percent_repeat_category_table.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+)
+```
+
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(session.dir, paste0(Sys.Date(), "_RNAseq_230105.txt"))
+)
+```
