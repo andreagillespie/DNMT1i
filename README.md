@@ -28,3 +28,5 @@ Nanopore_251013: Top up nanopore sequencing of just WT-DNMT1i condition, n=4.
 RNAseq_210108: Original RNAseq performed in 4 conditions w/ n=3, initially processed and analysed by EYNL & NGB. My analysis consisted of re-aligning and processing the data with an editing-aware alignment to account for ADAR editing of reads particularly in intergenic regions and mintRNAs.
 
 RNAseq_221222: Quadruple knockdown and quadruple NT in both DMSO & DNMT1i conditions. Also on the same sequencing run were cytoplasm and nuclear fractions of WT-DMSO & -DNMT1i conditions, n=2.
+
+RNAseq_230105: Repeat of previous experiment w/ separate fractions for cytoplasm and nucleus in WT +/- drug, n=2.
