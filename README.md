@@ -30,3 +30,7 @@ RNAseq_210108: Original RNAseq performed in 4 conditions w/ n=3, initially proce
 RNAseq_221222: Quadruple knockdown and quadruple NT in both DMSO & DNMT1i conditions. Also on the same sequencing run were cytoplasm and nuclear fractions of WT-DMSO & -DNMT1i conditions, n=2.
 
 RNAseq_230105: Repeat of previous experiment w/ separate fractions for cytoplasm and nucleus in WT +/- drug, n=2.
+
+RNAseq_230214: These are dC9-4NT & -4KD +/- drug, n=3 aligned with STAR as standard original RNAseq and ngm ADAR-aware alignment.
+
+RNAseq_230421: Due to some sequencing issues in MGC several of the samples from the previous run had to be resequenced in this run.
