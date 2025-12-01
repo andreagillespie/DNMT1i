@@ -1,0 +1,1066 @@
+---
+title: "RRBS_DNMT_peaks.Rmd"
+author: "Andrea"
+date: '2022-06-14'
+output: html_document
+---
+
+# load data from previous analysis, normalise and calculate beta
+```{r}
+library(edgeR)
+library(data.table)
+library(GenomicRanges)
+library(dplyr)
+library(RColorBrewer)
+library(circlize)
+library(ComplexHeatmap)
+library(ggplot2)
+library(viridis)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(enrichR)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/RRBS"
+heat.dir <- file.path(project.dir, "heatmaps")
+
+load(file.path(project.dir, "output_NGB/yall.RData"))
+dnmt.peaks <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/DNMT1_peaks_ordered.bed")
+samples_df <- read.csv(file.path(project.dir, "data/sample_metadata_AGRF_CAGRF21035742_H3GYWDSX2.csv"))
+
+# make GR objects for RRBS data and dnmt peaks
+dnmt.gr <- GRanges(dnmt.peaks$V1, IRanges(dnmt.peaks$V2, dnmt.peaks$V3))
+yall.gr <- GRanges(paste0("chr", yall$genes$Chr), IRanges(yall$genes$Locus, yall$genes$Locus ), ID = yall$genes$ID)
+
+# get overlap
+dnmt.me <- data.frame(mergeByOverlaps(yall.gr, dnmt.gr, minoverlap=1L))
+
+all <- dnmt.me[, c(7:10)]
+all$ID_db <- paste0(all$dnmt.gr.seqnames, ":", all$dnmt.gr.start, "_", all$dnmt.gr.end)
+temp <- left_join(yall$genes, all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in dnmt peaks
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+# Summarize methylation counts over dnmt peaks
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.dnmt <- merge(dnmt.peaks, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.dnmt[is.na(beta.dnmt)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.dnmt$V1, ":", beta.dnmt$V2, "_", beta.dnmt$V3)
+beta.dnmt <- as.data.frame(beta.dnmt[, c(4, 8, 12, 5, 9, 13, 6, 10, 14, 7, 11, 15)])
+rownames(beta.dnmt) <- coords
+
+# needs to be matrix and inverse order 
+heat.beta <- as.matrix(beta.dnmt)
+
+#col_fun = colorRamp2(c(0, 0.5, 1), c("blue", "yellow", "red"))
+#col_fun(seq(0,1, by = 0.005))
+pdf(file.path(heat.dir, "Heatmap_RRBS_DNMT1_peaks_ChIP_ordered.pdf"))
+Heatmap(heat.beta, cluster_rows = FALSE, cluster_columns = FALSE, show_row_names = FALSE, use_raster = FALSE)
+dev.off()
+
+# make heatmap of CGI DNMT peaks only, similar to above
+cgi.dnmt <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/DNMT1_CGI.bed")
+load(file.path(project.dir, "output_NGB/yall.RData"))
+cgi.gr <- GRanges(cgi.dnmt$V1, IRanges(cgi.dnmt$V2, cgi.dnmt$V3))
+yall.gr <- GRanges(paste0("chr", yall$genes$Chr), IRanges(yall$genes$Locus, yall$genes$Locus ), ID = yall$genes$ID)
+cgi.me <- data.frame(mergeByOverlaps(yall.gr, cgi.gr, minoverlap=1L))
+all <- cgi.me[, c(7:10)]
+all$ID_db <- paste0(all$cgi.gr.seqnames, ":", all$cgi.gr.start, "_", all$cgi.gr.end)
+temp <- merge(yall$genes, all, by.x = "ID", by.y = "ID", all.x = TRUE, sort = FALSE)
+yall$genes$DB_id <- temp$ID_db
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- c("R1_N0", "R1_N100", "R1_R0", "R1_R100", "R2_N0", "R2_N100", "R2_R0", "R2_R100", "R3_N0", "R3_N100", "R3_R0", "R3_R100") 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.cgi <- merge(cgi.dnmt, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.cgi[is.na(beta.cgi)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.cgi$V1, ":", beta.cgi$V2, "_", beta.cgi$V3)
+beta.cgi <- as.data.frame(beta.cgi[, c(4, 8, 12, 5, 9, 13, 6, 10, 14, 7, 11, 15)])
+rownames(beta.cgi) <- coords
+
+# needs to be matrix 
+heat.cgi <- as.matrix(beta.cgi)
+
+#coul <- rev(colorRampPalette(brewer.pal(8, "RdYlBu"))(200))
+#col_fun = colorRamp2(c(0, 0.5, 1), c("blue", "yellow", "red"))
+#col_fun(seq(0,1, by = 0.005))
+pdf(file.path(heat.dir, "Heatmap_RRBS_CGI_DNMT1_peaks_ChIP_ordered.pdf"))
+Heatmap(heat.cgi, cluster_rows = FALSE, cluster_columns = FALSE, show_row_names = FALSE, use_raster = FALSE)
+dev.off()
+
+# write out table to send to Brian
+write.table(
+  heat.cgi,
+  file.path(heat.dir, "Heatmap_RRBS_CGI_DNMT1_peaks_ChIP_ordered_table.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+
+# now also get full counts table for CGIs to look at why methylation values are unexpected
+chr.pos <- strsplit2(rownames(yDB$counts), ":")
+yTEMP <- data.frame(yDB$counts)
+yTEMP$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+yTEMP$Start <- as.numeric(start.end[,1])
+yTEMP$End <- as.numeric(start.end[,2])
+yTEMP.cgi <- merge(cgi.dnmt, yTEMP, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+write.table(
+  yTEMP.cgi,
+  file.path(heat.dir, "Heatmap_RRBS_CGI_DNMT1_peaks_all_counts_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# try making heatmap w/o lib.size norm
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- c("R1_N0", "R1_N100", "R1_R0", "R1_R100", "R2_N0", "R2_N100", "R2_R0", "R2_R100", "R3_N0", "R3_N100", "R3_R0", "R3_R100") 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.cgi <- merge(cgi.dnmt, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.cgi[is.na(beta.cgi)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.cgi$V1, ":", beta.cgi$V2, "_", beta.cgi$V3)
+beta.cgi <- as.data.frame(beta.cgi[, c(4, 8, 12, 5, 9, 13, 6, 10, 14, 7, 11, 15)])
+rownames(beta.cgi) <- coords
+
+# needs to be matrix  
+heat.cgi <- as.matrix(beta.cgi)
+
+#coul <- rev(colorRampPalette(brewer.pal(8, "RdYlBu"))(200))
+#col_fun = colorRamp2(c(0, 0.5, 1), c("blue", "yellow", "red"))
+#col_fun(seq(0,1, by = 0.005))
+pdf(file.path(heat.dir, "Heatmap_RRBS_CGI_DNMT1_peaks_ChIP_ordered_unnorm.pdf"))
+Heatmap(heat.cgi, cluster_rows = FALSE, cluster_columns = FALSE, show_row_names = FALSE, use_raster = FALSE)
+dev.off()
+```
+
+# make heatmap for CGIs only (CGI coords, from Brian's table), which intersecto with DNMT peaks and preserve order as above
+```{r}
+library(readxl)
+RRBS_CGI <- read_excel("data/RRBS_CGI.xlsx")
+bed.dir <- file.path(project.dir, "bed_files")
+
+# make bed file of CGI coords to intersect w/dnmt peaks bed
+RRBS_CGI$Chromosome <- paste0("chr", RRBS_CGI$Chromosome)
+cgi.bed <- RRBS_CGI[, 2:4]
+write.table(
+  cgi.bed,
+  file.path(bed.dir, "rrbs_cgi.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# save brian's table as txt
+write.table(
+  RRBS_CGI,
+  file.path(project.dir, "data/rrbs_cgi.txt"),
+  sep = "\t",
+  row.names = FALSE,
+  col.names = TRUE,
+  quote = FALSE
+)
+```
+
+# make bed file of CGI coords that intersect with DNMT peaks and preseve DNMT order
+```{bash}
+module load bedtools/2.27.1
+
+cd bed_files
+bedtools intersect -a DNMT1_peaks_ordered.bed -b rrbs_cgi.bed -wb > CGI_DNMT1_ordered.bed
+```
+
+```{r}
+# bedtools intersect has both a&b entries so just get unique CGI (b) coords and make bed
+ab.bed <- fread(file.path(bed.dir, "CGI_DNMT1_ordered.bed"))
+b.bed <- unique(ab.bed[,4:6])
+write.table(
+  b.bed,
+  file.path(bed.dir, "CGI_DNMT1_ordered.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# get %me table for only cgis w/dnmt in above bed
+rrbs.cgi <- fread(file.path(project.dir, "data/rrbs_cgi.txt"))
+cgi.me <- merge(b.bed, rrbs.cgi, by.x = c("V4", "V5", "V6"), by.y = c("Chromosome", "Start", "End"), sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+cgi.me[is.na(cgi.me)] <- NA
+
+# get only samples columns and move coordinates to rownames
+coords <- paste0(cgi.me$V4, ":", cgi.me$V5, "_", cgi.me$V6)
+cgi.me <- cgi.me[, 5:16]
+rownames(cgi.me) <- coords
+
+# needs to be matrix for heatmap
+# round to 5 decimals first
+#cgi.me <- round(cgi.me, 5)
+col_fun = rev(brewer.pal(11, name = "Spectral"))
+me.heat <- as.matrix(cgi.me)
+pdf(file.path(heat.dir, "Heatmap_RRBS_mePercent_CGI_coord_DNMT1_ChIP_ordered.pdf"))
+Heatmap(me.heat, cluster_rows = FALSE, col = col_fun, cluster_columns = FALSE, show_row_names = FALSE, use_raster = FALSE)
+dev.off()
+```
+
+# similar to above but summarising over intergenic ROIs
+```{r}
+erv.bed <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/ERV_promoter_ROI.bed")
+
+# make GR objects for roi ervs
+erv.gr <- GRanges(erv.bed$V1, IRanges(erv.bed$V2, erv.bed$V3))
+
+# get overlap
+erv.me <- data.frame(mergeByOverlaps(yall.gr, erv.gr, minoverlap=1L))
+
+all <- erv.me[, c(7:10)]
+all$ID_db <- paste0(all$erv.gr.seqnames, ":", all$erv.gr.start, "_", all$erv.gr.end)
+temp <- left_join(yall$genes, all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in erv rois
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+# Summarize methylation counts over dnmt peaks
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.erv <- merge(erv.bed, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.erv[is.na(beta.erv)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.erv$V1, ":", beta.erv$V2, "_", beta.erv$V3)
+beta.erv <- as.data.frame(beta.erv[, c(4, 8, 12, 6, 10, 14, 5, 9, 13, 7, 11, 15)])
+rownames(beta.erv) <- coords
+
+# needs to be matrix and inverse order 
+heat.beta.erv <- as.matrix(beta.erv)
+```
+
+# make heatmap of beta values
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+erv.heat <- t(scale(t(heat.beta.erv)))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+pdf(file.path(heat.dir, "Heatmap_ROI_promoter_methylation.pdf"))
+Heatmap(erv.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun)
+dev.off()
+```
+
+
+# similar to above, now for intergenic roi gene body
+```{r}
+body.bed <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/gene_body_ROI.bed")
+
+# make GR object for roi body 
+body.gr <- GRanges(body.bed$V1, IRanges(body.bed$V2, body.bed$V3))
+
+# get overlap
+body.me <- data.frame(mergeByOverlaps(yall.gr, body.gr, minoverlap=1L))
+
+all <- body.me[, c(7:10)]
+all$ID_db <- paste0(all$body.gr.seqnames, ":", all$body.gr.start, "_", all$body.gr.end)
+temp <- left_join(yall$genes, all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in erv rois
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+# Summarize methylation counts over dnmt peaks
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.body <- merge(body.bed, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.body[is.na(beta.body)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.body$V1, ":", beta.body$V2, "_", beta.body$V3)
+beta.body <- as.data.frame(beta.body[, c(4, 8, 12, 6, 10, 14, 5, 9, 13, 7, 11, 15)])
+rownames(beta.body) <- coords
+
+# needs to be matrix and inverse order 
+heat.beta.body <- as.matrix(beta.body)
+```
+
+# make heatmap of beta values
+```{r}
+body.heat <- t(scale(t(heat.beta.body)))
+
+col_fun2 = colorRamp2(c(-2, 0, 2), c("purple4", "white", "darkorange2"))
+pdf(file.path(heat.dir, "Heatmap_ROI_genebody_methylation.pdf"))
+Heatmap(body.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun2)
+dev.off()
+```
+
+
+
+
+# make heatmap for fig1 to match ChIP and ATAC data, gNT samples only, DNMT1 binding ordered
+```{r}
+body.bed <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/gene_body_ROI.bed")
+
+# make GR object for roi body 
+body.gr <- GRanges(body.bed$V1, IRanges(body.bed$V2, body.bed$V3))
+
+# get overlap
+body.me <- data.frame(mergeByOverlaps(yall.gr, body.gr, minoverlap=1L))
+
+all <- body.me[, c(7:10)]
+all$ID_db <- paste0(all$body.gr.seqnames, ":", all$body.gr.start, "_", all$body.gr.end)
+temp <- left_join(yall$genes, all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in erv rois
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes=FALSE]
+# Summarize methylation counts over dnmt peaks
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder=FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.body <- merge(body.bed, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.body[is.na(beta.body)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.body$V1, ":", beta.body$V2, "_", beta.body$V3)
+beta.body <- as.data.frame(beta.body[, c(4, 8, 12, 6, 10, 14, 5, 9, 13, 7, 11, 15)])
+rownames(beta.body) <- coords
+
+# needs to be matrix and inverse order 
+heat.beta.body <- as.matrix(beta.body)
+```
+
+# make heatmap of beta values
+```{r}
+body.heat <- t(scale(t(heat.beta.body)))
+
+col_fun2 = colorRamp2(c(-2, 0, 2), c("purple4", "white", "darkorange2"))
+pdf(file.path(heat.dir, "Heatmap_ROI_genebody_methylation.pdf"))
+Heatmap(body.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun2)
+dev.off()
+```
+
+# make genomewide beta values into bedgraph 
+```{r}
+# get all beta values
+Me <-  yall$counts[, grepl("-Me", colnames(yall$counts))]
+Un <-  yall$counts[, grepl("-Un", colnames(yall$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns
+chr.pos <- strsplit2(rownames(Beta), "-")
+Beta$Chr <- chr.pos[,1]
+Beta$Start <- chr.pos[,2]
+Beta$End <- as.numeric(chr.pos[,2]) + 1
+
+# reorder columns for bedgraphs of gNT samples (beta values averaged across replicates)
+gNT0.beta <- rowSums(Beta[, c("R1_gNT1_0nM_d7", "R2_gNT_0nM_d7", "R3_gNT_0nM_d7")])
+gNT0.bed <- cbind(Beta[, c("Chr", "Start", "End")], gNT0.beta)
+gNT0.bed[is.na(gNT0.bed)] <- 0
+
+gNT100.beta <- rowSums(Beta[, c("R1_gNT1_100nM_d7", "R2_gNT_100nM_d7", "R3_gNT_100nM_d7")])
+gNT100.bed <- cbind(Beta[, c("Chr", "Start", "End")], gNT100.beta)
+gNT100.bed[is.na(gNT100.bed)] <- 0
+
+# turn off scinetific notation and write out
+options(scipen=10)
+write.table(gNT0.bed, "bed_files/gNT_0nM.bdg", sep = "\t", col.names = F, row.names = F, quote = F)
+write.table(gNT100.bed, "bed_files/gNT_100nM.bdg", sep = "\t", col.names = F, row.names = F, quote = F)
+options(scipen=0)
+```
+
+# convert bedgraph to bigwig for deeptools
+```{bash}
+module load ucsc-utils
+
+sort -k1,1 -k2,2n bed_files/gNT_0nM.bdg > bed_files/gNT_0nM_sorted.bdg
+sort -k1,1 -k2,2n bed_files/gNT_100nM.bdg > bed_files/gNT_100nM_sorted.bdg
+
+bedGraphToBigWig bed_files/gNT_0nM_sorted.bdg /data/reference/dawson_labs/genome_size/Hg38_chrom.size BW/gNT_0nM_sorted.bedGraph.bw
+bedGraphToBigWig bed_files/gNT_100nM_sorted.bdg /data/reference/dawson_labs/genome_size/Hg38_chrom.size BW/gNT_100nM_sorted.bedGraph.bw
+```
+
+# also make z-score heatmap of 3 DNMT1 clusters for preTSS, coding region and postTSS regions with CGI promoter covariate
+```{r}
+# make heatmap annotation of  CGI promoters over 3 clusters
+cgiprom.bed <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/CGIprom_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed")
+cgiprom.ann <- ifelse(cgiprom.bed$V14 == 0, 0, 1)
+ha <- rowAnnotation(CGIpromoter = cgiprom.ann, col = list(CGIpromoter = c("0" = "white", "1" = "black")))
+
+# make region beds from 3 cluster bed
+kmeans3 <- fread("/dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/bed_files/GR_whitelist_DNMT1_sortedRegions_sum_kmeans3.bed")
+km3.chr <- as.vector(kmeans3$`#chrom`)
+km3.start <- as.numeric(kmeans3$start)
+km3.end <- as.numeric(kmeans3$end)
+
+pretss.gr <- GRanges(km3.chr, IRanges(km3.start-2000, km3.start))
+seqlevelsStyle(pretss.gr) <- "UCSC"
+cds.gr <- GRanges(km3.chr, IRanges(km3.start, km3.end))
+seqlevelsStyle(cds.gr) <- "UCSC"
+posttss.gr <- GRanges(km3.chr, IRanges(km3.end, km3.end+2000))
+seqlevelsStyle(posttss.gr) <- "UCSC"
+
+# get overlap, remove duplicates
+pretss.me <- data.frame(mergeByOverlaps(yall.gr, pretss.gr, minoverlap=1L))
+pretss.me <- pretss.me[-which(duplicated(pretss.me$ID)),]
+cds.me <- data.frame(mergeByOverlaps(yall.gr, cds.gr, minoverlap=1L))
+cds.me <- cds.me[-which(duplicated(cds.me$ID)),]
+posttss.me <- data.frame(mergeByOverlaps(yall.gr, posttss.gr, minoverlap=1L))
+posttss.me <- posttss.me[-which(duplicated(posttss.me$ID)),]
+
+pretss.all <- pretss.me[, c(7:10)]
+cds.all <- cds.me[, c(7:10)]
+posttss.all <- posttss.me[, c(7:10)]
+
+pretss.all$ID_db <- paste0(pretss.all$pretss.gr.seqnames, ":", pretss.all$pretss.gr.start, "_", pretss.all$pretss.gr.end)
+cds.all$ID_db <- paste0(cds.all$cds.gr.seqnames, ":", cds.all$cds.gr.start, "_", cds.all$cds.gr.end)
+posttss.all$ID_db <- paste0(posttss.all$posttss.gr.seqnames, ":", posttss.all$posttss.gr.start, "_", posttss.all$posttss.gr.end)
+
+temp <- left_join(yall$genes, pretss.all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in region
+InDB <- !is.na(yall$genes$DB_id)
+y.pretss <- yall[InDB, , keep.lib.sizes=FALSE]
+
+temp <- left_join(yall$genes, cds.all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in region
+InDB <- !is.na(yall$genes$DB_id)
+y.cds <- yall[InDB, , keep.lib.sizes=FALSE]
+
+temp <- left_join(yall$genes, posttss.all, "ID")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in region
+InDB <- !is.na(yall$genes$DB_id)
+y.posttss <- yall[InDB, , keep.lib.sizes=FALSE]
+
+
+# Summarize methylation counts over regions
+y.pretss <- rowsum(y.pretss, y.pretss$genes$DB_id, reorder=FALSE)
+y.cds <- rowsum(y.cds, y.cds$genes$DB_id, reorder=FALSE)
+y.posttss <- rowsum(y.posttss, y.posttss$genes$DB_id, reorder=FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yall$samples$lib.size[grepl("-Me", colnames(yall$counts))] + 0.5* yall$samples$lib.size[grepl("-Un", colnames(yall$counts))]
+y.pretss$samples$lib.size <- rep(LibSize, each=2)
+y.cds$samples$lib.size <- rep(LibSize, each=2)
+y.posttss$samples$lib.size <- rep(LibSize, each=2)
+  
+pretss.Me <-  y.pretss$counts[, grepl("-Me", colnames(y.pretss$counts))]
+cds.Me <-  y.cds$counts[, grepl("-Me", colnames(y.cds$counts))]
+posttss.Me <-  y.posttss$counts[, grepl("-Me", colnames(y.posttss$counts))]
+pretss.Un <-  y.pretss$counts[, grepl("-Un", colnames(y.pretss$counts))]
+cds.Un <-  y.cds$counts[, grepl("-Un", colnames(y.cds$counts))]
+posttss.Un <-  y.posttss$counts[, grepl("-Un", colnames(y.posttss$counts))]
+pretss.Beta <- as.data.frame(pretss.Me/(pretss.Me+pretss.Un))
+cds.Beta <- as.data.frame(cds.Me/(cds.Me+cds.Un))
+posttss.Beta <- as.data.frame(posttss.Me/(posttss.Me+posttss.Un))
+colnames(pretss.Beta) <- paste0(samples_df$sampleID, "_promoter")
+colnames(cds.Beta) <- paste0(samples_df$sampleID, "_geneBody")
+colnames(posttss.Beta) <- paste0(samples_df$sampleID, "_TES2k")
+
+# add coordinates as columns to match with original cds coords to order and fill in blanks
+kmeans3$start <- as.numeric(kmeans3$start)
+kmeans3$end <- as.numeric(kmeans3$end)
+
+chr.pos <- strsplit2(rownames(pretss.Beta), ":")
+pretss.Beta$Chr <- gsub("chr", "", chr.pos[,1])
+start.end <- strsplit2(chr.pos[,2], "_")
+pretss.Beta$Start <- as.numeric(start.end[,1])
+pretss.Beta$End <- as.numeric(start.end[,2])
+pretss.km3 <- merge(kmeans3, pretss.Beta, by.x = c("#chrom", "start"), by.y = c("Chr", "End"), all.x = TRUE, sort = FALSE)
+chr.pos <- strsplit2(rownames(cds.Beta), ":")
+cds.Beta$Chr <- gsub("chr", "", chr.pos[,1])
+start.end <- strsplit2(chr.pos[,2], "_")
+cds.Beta$Start <- as.numeric(start.end[,1])
+cds.Beta$End <- as.numeric(start.end[,2])
+cds.km3 <- merge(kmeans3, cds.Beta, by.x = c("#chrom", "start", "end"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+chr.pos <- strsplit2(rownames(posttss.Beta), ":")
+posttss.Beta$Chr <- gsub("chr", "", chr.pos[,1])
+start.end <- strsplit2(chr.pos[,2], "_")
+posttss.Beta$Start <- as.numeric(start.end[,1])
+posttss.Beta$End <- as.numeric(start.end[,2])
+posttss.km3 <- merge(kmeans3, posttss.Beta, by.x = c("#chrom", "end"), by.y = c("Chr", "Start"), all.x = TRUE, sort = FALSE)
+
+# if 0 for both Me&Un then yields NaN as it is undefined so change these to NA 
+pretss.km3[is.na(pretss.km3)] <- NA
+cds.km3[is.na(cds.km3)] <- NA
+posttss.km3[is.na(posttss.km3)] <- NA
+
+# merge all regions into single matrix for gNT samples only
+all.Beta <- cbind(pretss.km3[,c(14,18,22)], cds.km3[,c(14,18,22)], posttss.km3[,c(14,18,22)], pretss.km3[,c(15,19,23)], cds.km3[,c(15,19,23)], posttss.km3[,c(15,19,23)])
+
+# add coordinates as rownames
+coords <- paste0("chr", kmeans3$`#chrom`, ":", kmeans3$start, "-", kmeans3$end, "_", kmeans3$name)
+rownames(all.Beta) <- coords
+
+# needs to be matrix and inverse order 
+heat.all.beta <- as.matrix(all.Beta)
+
+all.beta.heat <- t(scale(t(heat.all.beta)))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+pdf(file.path(heat.dir, "Heatmap_DNMT1_3cluster_regions_methylation.pdf"))
+Heatmap(all.beta.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 1), column_names_gp = gpar(fontsize = 6), col = col_fun, left_annotation = ha, use_raster = FALSE, row_split = cgiprom.bed$V13)
+dev.off()
+```
+
+# similar to above, but each cluster in its own heatmap separated by expression groups
+```{r}
+gnt.exp <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/Hyper_editing/REDItools/results/gNT_DNMT1ivDMSO_DE_ftest_table.txt")
+km3.exp <- merge(kmeans3, gnt.exp, by.x = "name", by.y = "hgnc_symbol")
+# make expression groups
+km3.exp$exp_group <- "insig"
+km3.exp$exp_group[which(km3.exp$PValue < 0.05 & km3.exp$logFC > 0)] <- "up"
+km3.exp$exp_group[which(km3.exp$PValue < 0.05 & km3.exp$logFC < 0)] <- "down"
+
+km3.chr <- as.vector(km3.exp$`#chrom`)
+km3.start <- as.numeric(km3.exp$start)
+km3.end <- as.numeric(km3.exp$end)
+
+pretss.gr <- GRanges(km3.chr, IRanges(km3.start-2000, km3.start), loc = paste0(km3.exp$`#chrom`, ":", km3.exp$start, "_", km3.exp$end))
+seqlevelsStyle(pretss.gr) <- "UCSC"
+cds.gr <- GRanges(km3.chr, IRanges(km3.start, km3.end), loc = paste0(km3.exp$`#chrom`, ":", km3.exp$start, "_", km3.exp$end))
+seqlevelsStyle(cds.gr) <- "UCSC"
+posttss.gr <- GRanges(km3.chr, IRanges(km3.end, km3.end+2000), loc = paste0(km3.exp$`#chrom`, ":", km3.exp$start, "_", km3.exp$end))
+seqlevelsStyle(posttss.gr) <- "UCSC"
+
+# make list of gr objects and region names to loop through
+gr.list <- list(pretss.gr, cds.gr, posttss.gr)
+rnames <- c("_promoter", "_geneBody", "_TES2k")
+
+for(gr.i in 1:length(gr.list)){
+  # get overlap, remove duplicates
+  ovl.me <- data.frame(mergeByOverlaps(yall.gr, gr.list[[gr.i]], minoverlap=1L))
+  ovl.me <- ovl.me[-which(duplicated(ovl.me$ID)),]
+  ovl.all <- ovl.me[, c(7:10, 14)]
+  ovl.all$ID_gr <- paste0(ovl.all[,2], ":", ovl.all[,3], "_", ovl.all[,4])
+  
+  temp <- left_join(yall$genes, ovl.all, "ID")
+  yall$genes$DB_id <- temp$ID_gr
+  yall$genes$loc <- temp$loc.y
+  # only keep those found in region
+  InDB <- !is.na(yall$genes$DB_id)
+  y.ovl <- yall[InDB, , keep.lib.sizes = FALSE]
+  
+  # Summarize methylation counts over regions
+  y.ovl <- rowsum(y.ovl, y.ovl$genes$DB_id, reorder=FALSE)
+  # rename with gene region coords to match pre+cds+post
+  rownames(y.ovl$counts) <- y.ovl$genes$loc
+  # lib size from above
+  y.ovl$samples$lib.size <- rep(LibSize, each=2)
+  
+  # get beta values
+  y.ovl.Me <- y.ovl$counts[, grepl("-Me", colnames(y.ovl$counts))]
+  y.ovl.Un <- y.ovl$counts[, grepl("-Un", colnames(y.ovl$counts))]
+  y.ovl.Beta <- as.data.frame(y.ovl.Me/(y.ovl.Me+y.ovl.Un))
+  # name cols w/sample name + region name
+  colnames(y.ovl.Beta) <- paste0(gsub("_d7", "", samples_df$sampleID), rnames[gr.i])
+  # add coords to df
+  y.ovl.Beta$loc <- rownames(y.ovl.Beta)
+  ifelse(gr.i == 1, reg.beta <- y.ovl.Beta, reg.beta <- merge(reg.beta, y.ovl.Beta, all = TRUE, sort = FALSE))
+}
+
+reg.beta[is.na(reg.beta)] <- NA
+
+# make df for annotating beta values and merge
+km3.exp.ann <- data.frame("loc" = paste0(km3.exp$`#chrom`, ":", km3.exp$start, "_", km3.exp$end), "cluster" = km3.exp$deepTools_group, "group" = km3.exp$exp_group, "name" = km3.exp$name)
+km3.exp.ann <- km3.exp.ann[-which(duplicated(km3.exp.ann)),]
+reg.beta.ann <- left_join(reg.beta, km3.exp.ann, "loc")
+
+# separate into clusters make a heatmap for each and group by expression
+c1.reg.beta <- subset(reg.beta.ann, cluster == "cluster_1")
+c2.reg.beta <- subset(reg.beta.ann, cluster == "cluster_2")
+c3.reg.beta <- subset(reg.beta.ann, cluster == "cluster_3")
+
+c1.heat <- as.matrix(c1.reg.beta[, c(2, 6, 10, 14, 18, 22, 26, 30, 34, 3, 7, 11, 15, 19, 23, 27, 31, 35)])
+rownames(c1.heat) <- c1.reg.beta$name
+c1.heat <- t(scale(t(c1.heat)))
+c2.heat <- as.matrix(c2.reg.beta[, c(2, 6, 10, 14, 18, 22, 26, 30, 34, 3, 7, 11, 15, 19, 23, 27, 31, 35)])
+rownames(c2.heat) <- c2.reg.beta$name
+c2.heat <- t(scale(t(c2.heat)))
+c3.heat <- as.matrix(c3.reg.beta[, c(2, 6, 10, 14, 18, 22, 26, 30, 34, 3, 7, 11, 15, 19, 23, 27, 31, 35)])
+rownames(c3.heat) <- c3.reg.beta$name
+c3.heat <- t(scale(t(c3.heat)))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+pdf(file.path(heat.dir, "Heatmap_DNMT1_km3_cluster1_regions_methylation.pdf"))
+Heatmap(c1.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 2), column_names_gp = gpar(fontsize = 6), col = col_fun, use_raster = FALSE, row_split = c1.reg.beta$group)
+dev.off()
+
+pdf(file.path(heat.dir, "Heatmap_DNMT1_km3_cluster2_regions_methylation.pdf"))
+Heatmap(c2.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 1), column_names_gp = gpar(fontsize = 6), col = col_fun, use_raster = FALSE, row_split = c2.reg.beta$group)
+dev.off()
+
+pdf(file.path(heat.dir, "Heatmap_DNMT1_km3_cluster3_regions_methylation.pdf"))
+Heatmap(c3.heat, name = "z-score(normMe)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 1), column_names_gp = gpar(fontsize = 6), col = col_fun, use_raster = FALSE, row_split = c3.reg.beta$group)
+dev.off()
+```
+
+
+# make CGI DNMT heatmap again, but ordered by Me% and split into groups by %, gNT samples only
+```{r}
+library(limma)
+
+new.cgi.me <- cgi.me[, c(1:3, 7:9)]
+# add coordinates
+new.cgi.chr <- strsplit2(rownames(cgi.me), ":")
+new.cgi.me$chr <- new.cgi.chr[, 1]
+new.cgi.coord <- strsplit2(new.cgi.chr[, 2], "_")
+new.cgi.me$start <- new.cgi.coord[, 1]
+new.cgi.me$end <- new.cgi.coord[, 2]
+
+# get average methylation across DMSO samples and order by Me%
+new.cgi.me$wt.mean.me <- rowMeans(new.cgi.me[,1:3], na.rm = TRUE)
+new.cgi.me <- new.cgi.me[order(new.cgi.me$wt.mean.me), ]
+# remove NA across all wt reps
+new.cgi.me <- new.cgi.me[-which(is.nan(new.cgi.me$wt.mean.me)),]
+# make groups by Me%
+new.cgi.me$group <- ifelse(new.cgi.me$wt.mean.me < 10, "low", ifelse(new.cgi.me$wt.mean.me > 90, "high", "semi"))
+new.cgi.me$group <- factor(new.cgi.me$group, levels = c("low", "semi", "high"))
+
+new.cgi.heat <- as.matrix(new.cgi.me[, c(1:6)])
+col_fun = rev(brewer.pal(11, name = "Spectral"))
+pdf(file.path(heat.dir, "Heatmap_DNMT1_CGI_3group_Me_sorted.pdf"))
+Heatmap(new.cgi.heat, name = "%Me", cluster_columns = FALSE, cluster_rows = FALSE,  column_names_gp = gpar(fontsize = 6), col = col_fun, use_raster = FALSE, row_split = new.cgi.me$group)
+dev.off()
+
+# make bed file of heatmap coordinates to use for other heatmaps, separated by group
+cgi.bed.low <- new.cgi.me[which(new.cgi.me$group == "low"), c(7:9)]
+cgi.bed.semi <- new.cgi.me[which(new.cgi.me$group == "semi"), c(7:9)]
+cgi.bed.high <- new.cgi.me[which(new.cgi.me$group == "high"), c(7:9)]
+
+write.table(
+  cgi.bed.low,
+  file.path(bed.dir, "DNMT_CGI_Me_low.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+write.table(
+  cgi.bed.semi,
+  file.path(bed.dir, "DNMT_CGI_Me_semi.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+write.table(
+  cgi.bed.high,
+  file.path(bed.dir, "DNMT_CGI_Me_high.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# same as above, but ordered by Me% and split into groups by %Me in drug treated
+```{r}
+drug.cgi.me <- cgi.me[, c(1:3, 7:9)]
+# add coordinates
+drug.cgi.chr <- strsplit2(rownames(cgi.me), ":")
+drug.cgi.me$chr <- drug.cgi.chr[, 1]
+drug.cgi.coord <- strsplit2(drug.cgi.chr[, 2], "_")
+drug.cgi.me$start <- drug.cgi.coord[, 1]
+drug.cgi.me$end <- drug.cgi.coord[, 2]
+
+# get average methylation across DMSO samples and order by Me%
+drug.cgi.me$drug.mean.me <- rowMeans(drug.cgi.me[,4:6], na.rm = TRUE)
+drug.cgi.me <- drug.cgi.me[order(drug.cgi.me$drug.mean.me), ]
+# remove NA across all drug reps
+drug.cgi.me <- drug.cgi.me[-which(is.nan(drug.cgi.me$drug.mean.me)),]
+# make groups by Me%
+drug.cgi.me$group <- ifelse(drug.cgi.me$drug.mean.me < 10, "low", ifelse(drug.cgi.me$drug > 90, "high", "semi"))
+drug.cgi.me$group <- factor(drug.cgi.me$group, levels = c("low", "semi", "high"))
+
+drug.cgi.heat <- as.matrix(drug.cgi.me[, c(1:6)])
+pdf(file.path(heat.dir, "Heatmap_DNMT1_CGI_drug_3group_Me_sorted.pdf"))
+Heatmap(drug.cgi.heat, name = "%Me", cluster_columns = FALSE, cluster_rows = FALSE,  column_names_gp = gpar(fontsize = 6), col = col_fun, use_raster = FALSE, row_split = drug.cgi.me$group)
+dev.off()
+
+# make bed file of heatmap coordinates to use for other heatmaps, separated by group
+drug.bed.low <- drug.cgi.me[which(drug.cgi.me$group == "low"), c(7:9)]
+drug.bed.semi <- drug.cgi.me[which(drug.cgi.me$group == "semi"), c(7:9)]
+drug.bed.high <- drug.cgi.me[which(drug.cgi.me$group == "high"), c(7:9)]
+
+write.table(
+  drug.bed.low,
+  file.path(bed.dir, "DNMT_CGI_drug_Me_low.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+write.table(
+  drug.bed.semi,
+  file.path(bed.dir, "DNMT_CGI_drug_Me_semi.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+write.table(
+  drug.bed.high,
+  file.path(bed.dir, "DNMT_CGI_drug_Me_high.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make heatmap of gene regions for all genes which increase or decrease in transcription
+```{r}
+# using df from above w/expression, get only those w/increase
+up.reg.beta <- subset(reg.beta.ann, group == "up")
+# reorder and make matrix of beta values only
+up.heat <- as.matrix(up.reg.beta[, c(2, 6, 10, 14, 18, 22, 26, 30, 34, 3, 7, 11, 15, 19, 23, 27, 31, 35)])
+rownames(up.heat) <- up.reg.beta$name
+
+col_spec = rev(brewer.pal(11, name = "Spectral"))
+pdf(file.path(heat.dir, "Heatmap_upTx_generegions_methylation.pdf"))
+Heatmap(up.heat, name = "Beta", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 1), column_names_gp = gpar(fontsize = 6), col = col_spec, use_raster = FALSE)
+dev.off()
+
+# smae for downreg
+down.reg.beta <- subset(reg.beta.ann, group == "down")
+# reorder and make matrix of beta values only
+down.heat <- as.matrix(down.reg.beta[, c(2, 6, 10, 14, 18, 22, 26, 30, 34, 3, 7, 11, 15, 19, 23, 27, 31, 35)])
+rownames(down.heat) <- udownreg.beta$name
+
+pdf(file.path(heat.dir, "Heatmap_downTx_generegions_methylation.pdf"))
+Heatmap(down.heat, name = "Beta", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 1), column_names_gp = gpar(fontsize = 6), col = col_spec, use_raster = FALSE)
+dev.off()
+```
+
+# load %Me data from seqmonk to make density plots
+```{r}
+# get files of interest and make df
+nt.files <- list.files(
+  file.path(project.dir, "seqmonk_bdg"), 
+  pattern = "gNT", 
+  full.names = TRUE
+  )
+nt.names <- c("R1_gNT_0nM", "R1_gNT_100nM", "R2_gNT_0nM", "R2_gNT_100nM", "R3_gNT_0nM", "R3_gNT_100nM")
+
+nt.df <- fread(nt.files[1])
+colnames(nt.df) <- c("chr", "start", "end", nt.names[1])
+for(i in 2:6){
+  nt.x <- fread(nt.files[i])
+  nt.df <- cbind(nt.df, nt.x[, 4])
+  colnames(nt.df)[i+3] <- nt.names[i]
+}
+
+# make density plots of individual reps
+# format for ggplots
+dens.data <- data.frame(
+  "Me" = c(t(nt.df[, 4]), t(nt.df[, 5]), t(nt.df[, 6]), t(nt.df[, 7]), t(nt.df[, 8]), t(nt.df[, 9])),
+  "sample" = c(rep(colnames(nt.df)[4], 6176584), rep(colnames(nt.df)[5], 6176584), rep(colnames(nt.df)[6], 6176584), rep(colnames(nt.df)[7], 6176584), rep(colnames(nt.df)[8], 6176584), rep(colnames(nt.df)[9], 6176584))
+)
+
+pdf(file.path("plots/density_gNT_Me_reps.pdf"))
+ggplot(dens.data, aes(x = Me, color = sample)) +
+  geom_density(alpha = 0.2) + 
+  ggtitle("Me% by replicate") +
+  theme_minimal()
+dev.off()
+
+# also represent as violin
+pdf(file.path("plots/violin_gNT_Me_reps.pdf"))
+ggplot(dens.data, aes(x = sample, y = Me, fill = sample)) +
+  geom_violin(width = 1.8) + 
+  ggtitle("Me% per replicate, 500 bp bins") +
+  theme_minimal()
+dev.off()
+
+# make density plot w/reps merged
+dens.data$sample <- gsub("R[1-3]_", "", dens.data$sample)
+
+pdf(file.path("plots/density_gNT_Me_merged.pdf"))
+ggplot(dens.data, aes(x = Me, color = sample, fill = sample)) +
+  geom_density(alpha = 0.2) + 
+  ggtitle("Me% 100nM v DMSO") +
+  theme_minimal()
+dev.off()
+
+# also represent as violin
+pdf(file.path("plots/violin_gNT_Me_merged.pdf"))
+ggplot(dens.data, aes(x = sample, y = Me, fill = sample)) +
+  geom_violin(width = 1.4) + 
+  ggtitle("Me% 100nM v DMSO") +
+  theme_minimal()
+dev.off()
+```
+
+# check methylstion at erv elements only 
+```{r}
+rm.bed <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/REDItools/bed_files/Hg38_RepeatMasker.bed")
+erv.bed <- rm.bed[which(rm.bed$V6 %in% c("LINE", "SINE", "LTR", "LTR?", "SINE?")), ]
+
+# make GR object for all ervs 
+erv.gr <- GRanges(erv.bed$V1, IRanges(erv.bed$V2, erv.bed$V3))
+
+# get overlap
+erv.me <- data.frame(mergeByOverlaps(yall.gr, erv.gr, minoverlap=1L))
+
+all <- erv.me[, c(7:10)]
+all$ID_db <- paste0(all$erv.gr.seqnames, ":", all$erv.gr.start, "_", all$erv.gr.end)
+temp <- left_join(yall$genes, all, "ID", multiple = "first")
+yall$genes$DB_id <- temp$ID_db
+# only keep those found in erv rois
+InDB <- !is.na(yall$genes$DB_id)
+yDB <- yall[InDB, , keep.lib.sizes = FALSE]
+# Summarize methylation counts over rois
+yDB <- rowsum(yDB, yDB$genes$DB_id, reorder = FALSE)
+
+# Lib size is average of Meth + Unmeth
+LibSize <- 0.5* yDB$samples$lib.size[grepl("-Me", colnames(yDB$counts))] + 0.5* yDB$samples$lib.size[grepl("-Un", colnames(yDB$counts))]
+yDB$samples$lib.size <- rep(LibSize, each=2)
+  
+Me <-  yDB$counts[, grepl("-Me", colnames(yDB$counts))]
+Un <-  yDB$counts[, grepl("-Un", colnames(yDB$counts))]
+Beta <- as.data.frame(Me/(Me+Un))
+colnames(Beta) <- samples_df$sampleID 
+
+# add coordinates as columns to merge with dnmt peaks and fill blanks to match chipseq, maintain chip sorting
+chr.pos <- strsplit2(rownames(Beta), ":")
+Beta$Chr <- chr.pos[,1]
+start.end <- strsplit2(chr.pos[,2], "_")
+Beta$Start <- as.numeric(start.end[,1])
+Beta$End <- as.numeric(start.end[,2])
+beta.body <- merge(erv.bed, Beta, by.x = c("V1", "V2", "V3"), by.y = c("Chr", "Start", "End"), all.x = TRUE, sort = FALSE)
+# if 0 for bot Me&Un then yields NaN as it is undefined so change these to NA 
+beta.body[is.na(beta.body)] <- NA
+
+# reorder columns and move coordinates to rownames
+coords <- paste0(beta.body$V1, ":", beta.body$V2, "_", beta.body$V3)
+beta.body <- as.data.frame(beta.body[, c(4, 8, 12, 6, 10, 14, 5, 9, 13, 7, 11, 15)])
+rownames(beta.body) <- coords
+```
+
+# look at diff btw Tx v DMSO for 500 bp bins
+```{r}
+# get average me% across replicates
+nt.df$gNT_0nM <- rowMeans(nt.df[, c(4, 6, 8)], na.rm = TRUE)
+nt.df$gNT_100nM <- rowMeans(nt.df[, c(5, 7, 9)], na.rm = TRUE)
+
+# calculate %diff
+nt.df$DNMTi_DMSO_diff <- nt.df$gNT_100nM - nt.df$gNT_0nM
+
+# remove rows w/ 2+ NAs per condition
+diff.df <- nt.df[-which(rowSums(is.na(nt.df[, c(4, 6, 8)])) >= 2), ]
+diff.df <- diff.df[-which(rowSums(is.na(diff.df[, c(5, 7, 9)])) >= 2), ]
+
+# make density plot of diff
+pdf(file.path(project.dir, "plots/density_gNT_Me_diff.pdf"))
+ggplot(diff.df, aes(x = DNMTi_DMSO_diff)) +
+  geom_density(fill = "#69b3a2", color = "#69b3a2", alpha = 0.6) + 
+  ggtitle("Me% DNMT1i - DMSO") +
+  theme_minimal()
+dev.off()
+```
+
+# compare feature distribution of me% bins in DNMT1i
+```{r}
+# get subsets of areas of interest w/ 10% range, 90-100% for top end
+high.loss.df <- diff.df[which(diff.df$DNMTi_DMSO_diff <= -90), ]
+# -55 to -45% for average loss
+avg.loss.df <- diff.df[which(diff.df$DNMTi_DMSO_diff <= -45 & diff.df$DNMTi_DMSO_diff >= -55), ]
+# -5 to +5% for average loss
+no.change.df <- diff.df[which(diff.df$DNMTi_DMSO_diff <= 5 & diff.df$DNMTi_DMSO_diff >= -5), ]
+
+# now make annobar plots for each set
+# first annotate regions
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+high.loss.anno <- annotatePeak(
+  high.loss.df, 
+  tssRegion = c(-3000, 3000),
+  TxDb = txdb, 
+  annoDb = "org.Hs.eg.db" 
+  )
+
+region.dfs <- list(high.loss.df, avg.loss.df, no.change.df)
+file.names <- c("high_loss", "average_loss", "no_change")
+region.ann <- list()
+
+for(df.i in 1:length(region.dfs)){
+  region.gr <- with(region.dfs[[df.i]], GRanges(chr, IRanges(start = start, end = end)))
+	anno.region <- annotatePeak(
+	  region.gr, 
+	  tssRegion = c(-4000, 4000), 
+	  TxDb = txdb, 
+	  annoDb = "org.Hs.eg.db"
+	  )
+	region.ann[[df.i]] <- as.data.frame(anno.region)
+	
+	# write out each annotation table
+	write.table(
+	  region.ann[[df.i]],
+	  file.path(project.dir, paste0("results/annotation_bins500bp_", file.names[df.i], ".txt")),
+	  sep = "\t",
+	  col.names = TRUE,
+	  row.names = FALSE,
+	  quote = FALSE
+	)
+	
+	# make an annotation bar plot for each
+	pdf(
+	  file.path(project.dir, paste0("plots/annoBar_", file.names[df.i], ".pdf")), 
+	  height = 4, 
+	  width = 8)
+	plotAnnoBar(anno.region, title = file.names[df.i])
+	dev.off()
+}
+names(region.ann) <- file.names
+```
+
+# further exploration of characteristics of 3 groups of ∆Me
+```{r}
+# make a boxplot of steady state Me%
+me.box.df <- data.frame(
+  "Me" = c(high.loss.df$gNT_0nM, avg.loss.df$gNT_0nM, no.change.df$gNT_0nM),
+  "group" = c(
+    rep("high_loss", nrow(high.loss.df)), 
+    rep("average_loss", nrow(avg.loss.df)), 
+    rep("no_change", nrow(no.change.df))
+    )
+)
+me.box.df$group <- factor(me.box.df$group, levels = c("high_loss", "average_loss", "no_change"))
+
+#pdf(file.path(project.dir, "plots/boxplot_steadystate_Me_groups.pdf"))
+ggplot(me.box.df, aes(x = group, y = Me, fill = group)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("firebrick3", "goldenrod3", "turquoise4")) +
+  theme_light() +
+  labs(y = "Me% gNT_DMSO")
+#dev.off()
+
+# gsea of groupsdbs <- listEnrichrDbs()
+# select databases
+#dbs <- c(
+#  "GO_Molecular_Function_2025", 
+#  "GO_Biological_Process_2025", 
+#  "Reactome_Pathways_2024", 
+#  "WikiPathways_2024_Human"
+#  )
+
+#high.enr <- enrichr(unique(region.ann$high_loss$SYMBOL), dbs)
+#avg.enr <- enrichr(unique(region.ann$average_loss$SYMBOL), dbs)
+#nc.enr <- enrichr(unique(region.ann$no_change$SYMBOL), dbs)
+
+# groups are too large for meaningful GSEA
+length(unique(region.ann$high_loss$SYMBOL))
+length(unique(region.ann$average_loss$SYMBOL))
+length(unique(region.ann$no_change$SYMBOL))
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_RRBS_DNMTpeaks_analysis_2206.txt"))
+)
+```
