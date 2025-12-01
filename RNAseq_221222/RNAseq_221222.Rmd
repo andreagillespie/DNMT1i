@@ -1,0 +1,266 @@
+---
+title: "RNAseq_221222"
+author: "Andrea"
+date: '2023-01-04'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+
+Project directory: /scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/221222_NB501056_0901_AHT5VYBGXN
+
+fastq dir: /pipeline/Runs/NextSeq/221222_NB501056_0901_AHT5VYBGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/
+
+```{bash}
+# set up project dir
+cd /scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/
+
+mkdir 221222_NB501056_0901_AHT5VYBGXN
+cd 221222_NB501056_0901_AHT5VYBGXN
+
+mkdir fastqc
+mkdir scripts
+mkdir logs
+
+for fq in /pipeline/Runs/NextSeq/221222_NB501056_0901_AHT5VYBGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/fastqc.sbatch $fq 
+done
+
+# when fastqc is finished run multiqc 
+module load multiqc/1.8
+cd fastqc
+multiqc .
+cd ..
+```
+
+# align using ngm slam-seq settings as done for previous RNAseq
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/221222_NB501056_0901_AHT5VYBGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/ngm_align_paired_v043.sbatch $fq 
+done
+```
+
+# make TDFs
+```{bash}
+for bam in bams/*_sort_ngmRG_filtered.bam
+do
+sbatch scripts/toTDF.sbatch $bam
+done
+```
+
+# get counts for 4KD samples (samples were switched by MGC, but Brian wants to have a look at normalised counts anyway for now)
+# set up dirs
+```{r}
+project.dir <- "/scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/221222_NB501056_0901_AHT5VYBGXN"
+counts.dir <- file.path(project.dir, "counts")
+session.dir <- file.path(project.dir, "session-info")
+bam.dir <- file.path(project.dir, "bams")
+
+dir.create(session.dir)
+```
+
+# bed file needs to be reformatted, then SLAM count rerun with known gene bed file
+```{r}
+hg38.bed <- read.table("/data/reference/dawson_labs/bed_files/Hg38/Hg38EnsGene.bed")
+hg38.bed$V6 <- ifelse(hg38.bed$V6 == 1, hg38.bed$V6 <- "+", hg38.bed$V6 <- "-")
+
+write.table(
+  hg38.bed,
+  "/data/reference/dawson_labs/bed_files/Hg38/Hg38EnsGeneStrandPlusMinus.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# rerun for counts with new bed, prior commands commented out
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/221222_NB501056_0901_AHT5VYBGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/ngm_align_paired_v043.sbatch $fq 
+done
+```
+
+# having difficulty with slamdunk still so just use htseq
+```{bash}
+for bam in bams/*_sort_ngmRG_filtered.bam
+do
+sbatch scripts/htseq_count.sbatch $bam
+done
+```
+
+
+# load into edger and make sample ann,
+```{r}
+library(edgeR)
+
+# get a list of all TCcount files
+files <- list.files(counts.dir, pattern = "4[K|N]")
+# simplify names to use as sample names
+snames <- gsub(".count", "", files)
+
+# make sample annotation 
+sample.ann <- data.frame(
+  "files" = files, 
+  "samples" = snames, 
+  "cells" = c(rep("4KD", 2), rep("4NT", 2)),
+  "treatment" = rep(c("DMSO", "DNMTi"), 2)
+  )
+sample.ann$group <- paste(sample.ann$cells, sample.ann$treatment, sep = "_")
+
+dge.counts = readDGE(
+  file = sample.ann$files, 
+  path = counts.dir,
+  group = sample.ann$group
+  )
+```
+
+# Filtering out genes with low counts
+```{r}
+noint <- rownames(dge.counts$counts) %in% c("__no_feature", "__ambiguous", "__too_low_aQual","__not_aligned","__alignment_not_unique")
+table(noint)
+counts.cpms <- cpm(dge.counts$counts)
+keep <- rowSums(counts.cpms > 1 ) >= 1 & !noint
+dge.counts$counts <- dge.counts$counts[keep,]
+dim(dge.counts$counts)
+```
+
+# calc TMM norm and write out file
+```{r}
+results.dir <- file.path(project.dir, "results")
+
+dge.counts <- calcNormFactors(dge.counts, method="TMM")
+
+# multiply counts by norm factors
+counts.norm <- dge.counts$counts%*%diag(dge.counts$samples$norm.factors)
+write.table(
+  counts.norm,
+  file.path(results.dir, "4KD_TMMnorm_counts.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+```
+
+# realign using STAR in same manner as Naiara
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/221222_NB501056_0901_AHT5VYBGXN/ProjectFolders/Project_Wendy-Jia/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/align_star.sbatch $fq 
+done
+```
+
+# get counts with htseq
+```{bash}
+for bam in STAR_bams/*_Aligned.out.bam
+do
+sbatch scripts/STAR_htseq_count.sbatch $bam
+done
+```
+
+# make TDFs from STAR alignments
+```{bash}
+for bam in STAR_bams/*_Aligned.out.bam
+do
+sbatch scripts/STAR_toTDF.sbatch $bam
+done
+```
+
+# make normalised counts file for Brian as with NGM aligned data
+```{r}
+star.counts.dir <- file.path(project.dir, "STAR_counts")
+star.results.dir <- file.path(project.dir, "STAR_results")
+
+star.dge.counts = readDGE(
+  file = sample.ann$files, 
+  path = star.counts.dir,
+  group = sample.ann$group
+  )
+
+# write out raw counts
+write.table(
+  star.dge.counts$counts,
+  file.path(star.results.dir, "4KD_raw_counts.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+)
+
+# Filtering out genes with low counts
+noint <- rownames(star.dge.counts$counts) %in% c("__no_feature", "__ambiguous", "__too_low_aQual","__not_aligned","__alignment_not_unique")
+table(noint)
+star.counts.cpms <- cpm(star.dge.counts$counts)
+keep <- rowSums(star.counts.cpms > 1 ) >= 1 & !noint
+star.dge.counts$counts <- star.dge.counts$counts[keep,]
+dim(star.dge.counts$counts)
+```
+
+# calc TMM norm and write out file
+```{r}
+star.dge.counts <- calcNormFactors(star.dge.counts, method = "TMM")
+
+# multiply counts by norm factors
+star.counts.norm <- star.dge.counts$counts%*%diag(star.dge.counts$samples$norm.factors)
+write.table(
+  star.counts.norm,
+  file.path(results.dir, "4KD_TMMnorm_STAR_counts.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+```
+
+# make bedgraphs for Brian to make Spark plots
+```{bash}
+for bam in STAR_bams/4*_sort.bam
+do
+sbatch scripts/DeeptoolsBamCov.sbatch $bam
+done
+```
+
+### 2 samples were swapped before sequencing, correct genotypes are very clear in IGV due to 4KO vs 4NT, so swapping these samples in data upload (Brian is changin in figures)
+```{r}
+raw.table <- read.table(file.path(star.results.dir, "4KD_raw_counts.txt"), check.names = FALSE)
+colnames(raw.table) <- c("4NT-DNMT1i_S10", "4KD-DNMT1i_S12", "4NT-DMSO_S9", "4KD-DMSO_S11")
+write.table(
+  raw.table,
+  file.path(star.results.dir, "4KD_raw_counts.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+)
+```
+
+# we want heatmaps of 4NT/4KD pilot samples at mintRNAs, need to make bigwigs first
+```{bash}
+for bam in bams/4*filtered.bam
+do
+sbatch scripts/BamCov.sbatch $bam
+done
+
+sbatch scripts/DT_heatmap_mintRNA_5kb_1Mb_RNAseq.sbatch 
+```
+
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(session.dir, paste0(Sys.Date(), "_RNAseq_221222.txt"))
+)
+```
