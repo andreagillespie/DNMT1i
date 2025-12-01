@@ -1,0 +1,2381 @@
+---
+title: "REDItools"
+output: html_document
+---
+
+# analysis: Looking for edited reads from RNA-seq data. Similar data-wise to SLAM-seq
+
+# Location of new RC fastqs:
+/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/Hyper_editing/fastq_RC
+
+# use gtf to make UTR bed
+```{bash}
+python scripts/extract_transcript_regions.py -i /data/reference/dawson_labs/genomes/Hg38/Homo_sapiens.GRCh38.102.gtf -o reference_files/Homo_sapiens.GRCh38.102 --gtf
+```
+
+# load libraries
+```{r}
+library(Rsubread)
+library(data.table)
+library(dplyr)
+library(GenomicRanges)
+library(annotatr)
+library(BioCircos)
+library(RColorBrewer)
+library(edgeR)
+library(ComplexHeatmap)
+library(circlize)
+library(ggplot2)
+```
+
+# make genome wide bed file to use in place of UTR as more suited to this experiment
+```{r}
+hg38.gff <- flattenGTF(
+    "/data/reference/dawson_labs/genomes/Hg38/Homo_sapiens.GRCh38.102.gtf",
+    GTF.featureType = "transcript",
+    GTF.attrType = "transcript_id",
+    method = "merge"
+    )
+
+# select columns for bed w/ strand
+hg38.bed <- cbind(hg38.gff$Chr, hg38.gff$Start, hg38.gff$End, hg38.gff$GeneID, ".", hg38.gff$Strand)
+# write out to ref files (from SLAMDUNK dir)
+write.table(
+  hg38.bed,
+  "reference_files/Hg38.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+
+# run ngm with slamdunk settings on original (trimmed) reads as paired end, then apply slamdunk filter and get snps
+```{bash}
+# run from hyperediting dir
+for fq in fastq/*R1_001.fastq
+do
+sname=`basename $fq _R1_001.fastq`
+sbatch REDItools/scripts/ngm_align_paired.sbatch $fq fastq/${sname}_R2_001.fastq
+done
+```
+
+# merge replicate bams, from bams dir
+```{bash}
+sbatch ../scripts/merge_bams.sbatch R1-gNT1-0nM-d7_S1_ngm_filtered.bam R2-gNT-0nM-d7_S5_ngm_filtered.bam R3-gNT-0nM-d7_S9_ngm_filtered.bam gNT-0nM-d7
+sbatch ../scripts/merge_bams.sbatch R1-gNT1-100nM-d7_S2_ngm_filtered.bam R2-gNT-100nM-d7_S6_ngm_filtered.bam R3-gNT-100nM-d7_S10_ngm_filtered.bam gNT-100nM-d7
+sbatch ../scripts/merge_bams.sbatch R1-gRNF4-1-0nM-d7_S3_ngm_filtered.bam R2-gRNF4-1-0nM-d7_S7_ngm_filtered.bam R3-gRNF4-1-0nM-d7_S11_ngm_filtered.bam gRNF4-1-0nM-d7
+sbatch ../scripts/merge_bams.sbatch R1-gRNF4-1-100nM-d7_S4_ngm_filtered.bam R2-gRNF4-1-100nM-d7_S8_ngm_filtered.bam R3-gRNF4-1-100nM-d7_S12_ngm_filtered.bam gRNF4-1-100nM-d7
+```
+
+# run reditools on ngm aligned merged bams, from bams dir
+```{bash}
+mkdir ../results/ngm_paired
+for bam in *d7_ngm_filtered.bam
+do
+sbatch ../scripts/reditools_ngm.sbatch $bam
+done
+```
+
+# run slamdunk snps calls on merged bams
+```{bash}
+for bam in *d7_ngm_filtered.bam
+do
+sbatch ../scripts/slam_snps_merged.sbatch $bam
+done
+```
+
+# compile positions of all SNPs for each sample into comprehensive set of all SNPs to exculde
+```{r}
+# loop through all vcfs, get coordinates for each and add to full list with unique values only
+# set dirs for analysis, work from snp dir
+redi.dir <- "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/REDItools"
+snp.dir <- file.path(redi.dir, "snps")
+setwd(snp.dir)
+vcfs <- list.files(snp.dir, pattern = "d7_ngm_filtered_snp.vcf", full.names = TRUE)
+snps <- data.frame("chr" = character(), "pos" = integer(), stringsAsFactors = FALSE)
+
+for(vcf in vcfs){
+  vcf.file <- fread(vcf)
+  chr.pos <- vcf.file[, 1:2]
+  snps <- rbind(snps, chr.pos)
+  snps <- unique(snps)
+}
+
+# write out final snps set coordinates
+write.table(
+  snps,
+  file.path(snp.dir, "all_merged_sample_slamdunk_snps.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# add common snps from dbSNP reference file
+dbsnp <- fread("/data/reference/dawson_labs/dbSNP/hg38/b151/00-common_all.vcf.gz")
+dbsnp <- dbsnp[, 1:2]
+dbsnp$`#CHROM` <- paste0("chr", dbsnp$`#CHROM`)
+snps <- rbind(snps, dbsnp)
+snps <- unique(snps)
+
+# write out slamdunk snps + dbsnp file
+write.table(
+  snps,
+  file.path(snp.dir, "dbsnp_slamdunk_merged_snps.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make annotation using same gtf as Nairara
+```{r}
+tx.ensg <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "transcript",
+    GTF.attrType = "gene_id",
+    method = "merge"
+    )
+    
+tx.name <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "transcript",
+    GTF.attrType = "gene_name",
+    method = "merge"
+    )
+
+start.ensg <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "start_codon",
+    GTF.attrType = "gene_id",
+    method = "merge"
+    )
+
+start.name <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "start_codon",
+    GTF.attrType = "gene_name",
+    method = "merge"
+    )
+
+stop.ensg <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "stop_codon",
+    GTF.attrType = "gene_id",
+    method = "merge"
+    )
+
+stop.name <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "stop_codon",
+    GTF.attrType = "gene_name",
+    method = "merge"
+    )
+
+utr.ensg <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "UTR",
+    GTF.attrType = "gene_id",
+    method = "merge"
+    )
+
+utr.name <- flattenGTF(
+    "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/STAR/index/gencode.v38.annotation.gtf",
+    GTF.featureType = "UTR",
+    GTF.attrType = "gene_name",
+    method = "merge"
+    )
+
+tx.ann <- merge(tx.ensg, tx.name, by.x = c("Chr", "Start", "End"), by.y = c("Chr", "Start", "End"), all = TRUE)
+tx.ann <- tx.ann[ , -c(5, 7)]
+colnames(tx.ann) <- c("FeatureChr", "FeatureStart", "FeatureEnd", "GeneID", "GeneName")
+tx.ann$FeatureType <- "transcript"
+start.ann <- merge(start.ensg, start.name, by.x = c("Chr", "Start", "End"), by.y = c("Chr", "Start", "End"), all = TRUE)
+start.ann <- start.ann[ , -c(5, 7)]
+colnames(start.ann) <- c("FeatureChr", "FeatureStart", "FeatureEnd", "GeneID", "GeneName")
+start.ann$FeatureType <- "start_codon"
+stop.ann <- merge(stop.ensg, stop.name, by.x = c("Chr", "Start", "End"), by.y = c("Chr", "Start", "End"), all = TRUE)
+stop.ann <- stop.ann[ , -c(5, 7)]
+colnames(stop.ann) <- c("FeatureChr", "FeatureStart", "FeatureEnd", "GeneID", "GeneName")
+stop.ann$FeatureType <- "stop_codon"
+utr.ann <- merge(utr.ensg, utr.name, by.x = c("Chr", "Start", "End"), by.y = c("Chr", "Start", "End"), all = TRUE)
+utr.ann <- utr.ann[ , -c(5, 7)]
+colnames(utr.ann) <- c("FeatureChr", "FeatureStart", "FeatureEnd", "GeneID", "GeneName")
+utr.ann$FeatureType <- "UTR"
+ann.all <- rbind(tx.ann, start.ann, stop.ann, utr.ann)
+```
+
+# remove snps from each results table and annotate
+```{r}
+results.dir <- file.path(redi.dir, "results/ngm_paired")
+table.dir <- file.path(results.dir, "outTables")
+tx.ann.dir <- file.path(table.dir, "RNAseq_ann")
+gw.ann.dir <- file.path(table.dir, "genomewide_ann")
+dir.create(table.dir)
+dir.create(tx.ann.dir)
+dir.create(gw.ann.dir)
+# work from results dir
+setwd(results.dir)
+sample.dirs <- dir(results.dir, recursive = FALSE, pattern = "d7$", full.names = TRUE)
+
+# make gr object for rnaseq ann
+#gff.gr <- with(ann.all, GRanges(FeatureChr, IRanges(start = FeatureStart, end = FeatureEnd)))
+#seqlevelsStyle(gff.gr) <- "UCSC"
+
+# make genome wide annotation
+annots <- c("hg38_genes_promoters", "hg38_genes_5UTRs", "hg38_genes_3UTRs", "hg38_genes_exons", "hg38_genes_introns", "hg38_cpg_islands", "hg38_cpg_shores", "hg38_cpg_shelves", "hg38_cpg_inter", "hg38_genes_intergenic")
+hg38.ann = build_annotations(genome = 'hg38', annotations = annots)
+
+# loop through each table and remove snps
+for(sample.dir in sample.dirs){
+  all.edits <- fread(list.files(sample.dir, pattern = "outTable", recursive = TRUE, full.names = TRUE))
+  no.snps <- anti_join(all.edits, snps, by = c("Region" = "#CHROM", "Position" = "POS"))
+  # also limit to valid chomosomes and remove, low frequency and superfluous columns 
+  keep <- which(substr(no.snps$Region, 1, 3) == "chr" & no.snps$Frequency > 0)
+  no.snps <- no.snps[keep, -c(4, 10:14)]
+  rm(all.edits)
+  
+  # make gr of edits
+	edits.pos <- with(no.snps, GRanges(Region, IRanges(start=Position, width = 1)))
+	edits.pos$Reference <- no.snps$Reference 
+	edits.pos$Coverage_q30 <- no.snps$`Coverage-q30` 
+	edits.pos$MeanQ <- no.snps$MeanQ 
+	edits.pos$BaseCount_A_C_G_T <- no.snps$`BaseCount[A,C,G,T]`
+	edits.pos$AllSubs <- no.snps$AllSubs
+	edits.pos$Frequency <- no.snps$Frequency
+	seqlevelsStyle(edits.pos) <- "UCSC"
+	# annotate table based on Naiara's gtf
+#  olaps <- findOverlaps(edits.pos, gff.gr)
+#  edits.gff <- cbind(no.snps[queryHits(olaps),], ann.all[subjectHits(olaps),])
+  
+  # aggregate positions with multiple entries
+#  edits.agg <- data.frame(matrix(ncol = 14, nrow = 0))
+#  colnames(edits.agg) <- colnames(edits.gff)
+#  positions <- unique(edits.gff[,1:2])
+#  for(pos.i in 1:nrow(positions)){
+#    pos <- positions[pos.i,]
+#    u.edit <- subset(edits.gff, Region == pos$Region & Position == pos$Position)
+#    non.tx <- which(u.edit$FeatureType != "transcript")
+#    if(length(non.tx) > 0){
+#      c.edit <- u.edit[non.tx, ]
+#    } else{
+#      c.edit <- cbind(u.edit[1, 1:9], min(u.edit$FeatureStart), max(u.edit$FeatureEnd), toString(unique(u.edit$GeneID)), toString(unique(u.edit$GeneName)), u.edit$FeatureType[1])
+#    }
+#    colnames(c.edit)[10:14] <- colnames(edits.gff)[10:14]
+#    edits.agg <- rbind(edits.agg, c.edit)
+#  }
+  
+  # write out final filtered ann table
+#  write.table(
+#    edits.agg,
+#    file.path(tx.ann.dir, paste0(basename(sample.dir), "_filter_outTable_Tx_ann_bp_res.txt")),
+#    sep = "\t",
+#    quote = FALSE,
+#    col.names = TRUE,
+#    row.names = FALSE
+#  )
+  
+  # annotate genome wide
+  gw.ann.edits = annotate_regions(regions = edits.pos, annotations = hg38.ann, ignore.strand = TRUE, quiet = FALSE)
+  gw.ann.df <- data.frame(gw.ann.edits)
+  gw.ann.df <- gw.ann.df[ , -c(3:5, 17:19)]
+  colnames(gw.ann.df)[c(1, 2, 9)] <- c("EditChr", "EditPosition", "annot.chr")
+  
+  # aggregate positions with multiple entries
+  gw.agg <- data.frame(matrix(ncol = 13, nrow = 0))
+  positions <- unique(gw.ann.df[,1:2])
+  for(pos.i in 1:nrow(positions)){
+    pos <- positions[pos.i,]
+    u.edit <- subset(gw.ann.df, EditChr == pos$EditChr & EditPosition == pos$EditPosition)
+   
+    # run through each and keep highest priority annot defined as ("hg38_genes_promoters", "hg38_genes_5UTRs", "hg38_genes_3UTRs", "hg38_cpg_islands", "hg38_cpg_shores", "hg38_cpg_shelves", "hg38_cpg_inter", "hg38_genes_exons", "hg38_genes_introns", "hg38_genes_intergenic")
+    if("hg38_genes_promoters" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_promoters")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_genes_5UTRs" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_5UTRs")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_genes_3UTRs" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_3UTRs")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_cpg_islands" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_cpg_islands")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_cpg_shores" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_cpg_shores")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_cpg_shelves" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_cpg_shelves")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_cpg_inter" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_cpg_inter")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_genes_exons" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_exons")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_genes_introns" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_introns")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    } else if("hg38_genes_intergenic" %in% u.edit$annot.type){
+      anntype <- which(u.edit$annot.type == "hg38_genes_intergenic")
+      a.edit <- u.edit[anntype, ]
+      c.edit <- cbind(a.edit[1, 1:9], min(a.edit$annot.start), max(a.edit$annot.end), toString(unique(a.edit$annot.symbol)), a.edit$annot.type[1])
+    }
+    colnames(c.edit)[9:13] <- c("FeatureChr", "FeatureStart", "FeatureEnd", "Symbol", "AnnotType")
+    gw.agg <- rbind(gw.agg, c.edit)
+  }
+    
+  write.table(
+    gw.agg,
+    file.path(gw.ann.dir, paste0(basename(sample.dir), "_filter_outTable_GW_ann_bp_res.txt")),
+    sep = "\t",
+    quote = FALSE,
+    col.names = TRUE,
+    row.names = FALSE
+  )
+}
+```
+
+
+# collate tables by gene, work from table dir
+```{r}
+setwd(gw.ann.dir)
+bps <- list.files(gw.ann.dir, pattern = "d7_filter_outTable_GW_ann_bp_res.txt")
+
+for(bp in bps[1:4]){
+  # get bp res table to work from
+  bp.res <- fread(file.path(gw.ann.dir, bp))
+  # initialise gene table
+  gene.edits <- data.frame(matrix(ncol = 10, nrow = 0))
+  # loop through each feature and add entry for table
+  features <- unique(bp.res[,10:11])
+  for(feat.i in 1:nrow(features)){
+    f.sub <- subset(bp.res, FeatureStart == features$FeatureStart[feat.i] & FeatureEnd == features$FeatureEnd[feat.i])
+    f.entry <- cbind(
+      f.sub$AnnotType[1],
+      f.sub$Symbol[1],
+      f.sub$FeatureChr[1],
+      f.sub$FeatureStart[1],
+      f.sub$FeatureEnd[1],
+      1 + f.sub$FeatureEnd[1] - f.sub$FeatureStart[1],
+      sum(round(f.sub$Frequency * f.sub$Coverage_q30)),
+      nrow(f.sub),
+      nrow(f.sub)/(1 + f.sub$FeatureEnd[1] - f.sub$FeatureStart[1]),
+      mean(f.sub$Frequency)
+    )
+    gene.edits <- rbind(gene.edits, f.entry)
+  }
+  colnames(gene.edits) <- c("FeatureType", "Symbol", "FeatureChr", "FeatureStart", "FeatureEnd", "FeatureLength", "TotalEdited", "NumberEditSites", "EditSites/FeatureLength", "MeanFrequencyEdits")
+  
+  write.table(
+    gene.edits,
+    file.path(gw.ann.dir, gsub("bp", "gene", bp)),
+    sep = "\t",
+    col.names = TRUE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+}
+```
+
+# make table of frequency at all edit sites for each sample
+```{r}
+plots.dir <- file.path(redi.dir, "plots")
+dir.create(plots.dir)
+
+bp.res <- fread(file.path(gw.ann.dir, bps[1]))
+edit.freq <- bp.res[, c(1, 2, 8)]
+freq.i <- 3
+colnames(edit.freq)[freq.i] <- gsub("_filter_outTable_GW_ann_bp_res.txt", "", basename(sample.dirs[1]))
+
+for(sam.i in 2:4){
+  all.edits <- fread(file.path(gw.ann.dir, bps[sam.i]))
+  ns.freq <- all.edits[, c(1, 2, 8)]
+  edit.freq <- full_join(edit.freq, ns.freq)
+  freq.i <- freq.i + 1
+  colnames(edit.freq)[freq.i] <- gsub("_filter_outTable_GW_ann_bp_res.txt", "", basename(sample.dirs[sam.i]))
+}
+
+# fill in 0s
+edit.freq[,3:6] <- nafill(edit.freq[,3:6], fill = 0)
+edit.freq <- edit.freq[with(edit.freq, order(EditChr, EditPosition))]
+
+# write out final table
+write.table(
+  edit.freq,
+  file.path(results.dir, "All_editing_sites_frequency.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make scatterplots for each comparison
+# set list of comps for iteration, name as Naiara did
+comps <- list(
+  "Treatment_sgNT" = c("gNT-100nM-d7", "gNT-0nM-d7"), 
+  "Treatment_sgRNF4" = c("gRNF4-1-100nM-d7", "gRNF4-1-0nM-d7"), 
+  "Between_T" = c("gNT-100nM-d7", "gRNF4-1-100nM-d7"), 
+  "Between_NT" = c("gNT-0nM-d7", "gRNF4-1-0nM-d7")
+)
+
+pdf(file.path(plots.dir, "Treatment_sgNT_editing_frequency_scatterplot.pdf"), height = 8, width = 8)
+plot(edit.freq$`gNT-100nM-d7`, edit.freq$`gNT-0nM-d7`, col = rgb(0, 100, 0, 50, maxColorValue = 255), pch = 16, cex = 1.1, xlab = "gNT-100nM-d7", ylab = "gNT-0nM-d7")
+dev.off()
+
+pdf(file.path(plots.dir, "Treatment_sgRNF4_editing_frequency_scatterplot.pdf"), height = 8, width = 8)
+plot(edit.freq$`gRNF4-1-100nM-d7`, edit.freq$`gRNF4-1-0nM-d7`, col = rgb(0, 100, 0, 50, maxColorValue = 255), pch = 16, cex = 1.1, xlab = "gRNF4-1-100nM-d7", ylab = "gRNF4-1-0nM-d7")
+dev.off()
+
+pdf(file.path(plots.dir, "Between_T_editing_frequency_scatterplot.pdf"), height = 8, width = 8)
+plot(edit.freq$`gNT-100nM-d7`, edit.freq$`gRNF4-1-100nM-d7`, col = rgb(0, 100, 0, 50, maxColorValue = 255), pch = 16, cex = 1.1, xlab = "gNT-100nM-d7", ylab = "gRNF4-1-100nM-d7")
+dev.off()
+
+pdf(file.path(plots.dir, "Between_NT_editing_frequency_scatterplot.pdf"), height = 8, width = 8)
+plot(edit.freq$`gNT-0nM-d7`, edit.freq$`gRNF4-1-0nM-d7`, col = rgb(0, 100, 0, 50, maxColorValue = 255), pch = 16, cex = 1.1, xlab = "gNT-0nM-d7", ylab = "gRNF4-1-0nM-d7")
+dev.off()
+```
+
+# make bed of all intergenic regions to get counts from bam files across these regions
+```{r}
+# make non-genic annotation
+annots <- c("hg38_genes_promoters", "hg38_genes_1to5kb", "hg38_genes_intergenic")
+inter.ann = build_annotations(genome = 'hg38', annotations = annots)
+
+# sort all annots and make into bed and write out
+inter.ann <- sortSeqlevels(inter.ann)
+inter.ann <- sort(inter.ann, ignore.strand = TRUE)
+intergenic.ann <- as.data.frame(inter.ann)
+
+# remove mitochondrial chr from ann to avoid errors
+intergenic.ann <- intergenic.ann[-(which(intergenic.ann$seqnames == "chrM")), ]
+
+# write out
+write.table(
+  intergenic.ann,
+  file.path(redi.dir, "intergenic/intergenic.bed"),
+  sep = "\t", 
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# get intersect of each bam with intergenic bed
+```{bash}
+# from intergenic dir
+mkdir intergenic
+cd intergenic
+
+for bam in ../bams/*d7_ngm_filtered.bam
+do
+sbatch ../scripts/intergenic_counts.sbatch $bam
+done
+```
+
+# make circos plot of intergenic counts for gNT drug
+```{r}
+int.dir <- file.path(redi.dir, "intergenic")
+shiny.dir <- file.path(int.dir, "shinyCircos")
+
+# get intergenic counts for gNT drug sample
+int.counts <- fread(file.path(redi.dir, "intergenic/gNT-100nM-d7_intergenic_counts.txt"))
+# limit to non-promoter intergenic only
+int.counts <- int.counts[int.counts$V10 == "hg38_genes_intergenic", ]
+genomeChr = c(as.character(1:22), "X", "Y")
+# only keep chromosomes
+chr.names <- paste0("chr", genomeChr)
+int.counts <- int.counts[int.counts$V1 %in% chr.names]
+#chr.size.file <- fread("/data/reference/dawson_labs/genome_size/GRCh38_chrom.size")
+#hg38.chr.size = as.list(chr.size.file$V2[1:24])
+#names(hg38.chr.size) <- chr.size.file$V1[1:24]
+
+#tracks = BioCircosTracklist()
+# Add one track for each chromosome
+#for (i in 1:length(genomeChr)){
+  # Define histogram/bars to be displayed
+#  barColor = colorRampPalette(brewer.pal(8, "Spectral"))(length(genomeChr))[i]
+  # Add a track with bars on the i-th chromosome
+#  tracks = tracks + BioCircosBarTrack(
+#    paste0("bars", genomeChr[i]), 
+#    chromosome = genomeChr[i], 
+#    starts = int.counts$V2, 
+#    ends = int.counts$V3, 
+#    values = int.counts$V11, 
+#    color = barColor
+#    )
+#}
+
+# Add background
+#tracks = tracks + BioCircosBackgroundTrack("bars_background", fillColors = "#d9d9da", borderColors = "#000000")
+
+#pdf(file.path(plots.dir, "intergenic_circos.pdf"))
+#BioCircos(tracks, genomeFillColor = "Spectral", genome = hg38.chr.size, genomeTicksDisplay = F, genomeLabelDy = 0)
+#dev.off()
+
+# make table for shiny circos 
+shiny.data <- int.counts[, c(1:3, 11)]
+colnames(shiny.data) <- c("chr", "start", "end", "value")
+
+# remove any regions smaller than 10kbp
+shiny.data <- shiny.data[-which(shiny.data$end - shiny.data$start <= 10000),]
+# remove any regions with fewer than 100 reads
+shiny.data <- shiny.data[-which(shiny.data$value < 100),]
+# add colors
+shiny.data$color <- "A"
+shiny.data$color[shiny.data$chr %in% chr.names[seq(1, 24, 2)]] <- "B"
+write.table(
+  shiny.data,
+  file.path(shiny.dir, "shiny_bar_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make logged table for shiny circos 
+shiny.log10 <- shiny.data
+shiny.log10$value <- log10(shiny.log10$value)
+write.table(
+  shiny.log10,
+  file.path(shiny.dir, "shiny_bar_data_log10.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# get reads/length of region to normalise for feature length
+shiny.length <- shiny.data
+shiny.length$value <- shiny.data$value/(shiny.data$end - shiny.data$start)
+# remove any regions with fewer than 0.01 reads/length
+shiny.length <- shiny.length[-which(shiny.length$value < 0.01),]
+write.table(
+  shiny.length,
+  file.path(shiny.dir, "shiny_bar_data_length_10k_01rpbp.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# use different colours for different lengths
+length.col <- shiny.data
+length.col$color <- "C"
+length.col$value <- shiny.data$value/(shiny.data$end - shiny.data$start)
+length.col$color[which((shiny.data$end - shiny.data$start) >= 100000)] <- "B"
+length.col$color[which((shiny.data$end - shiny.data$start) >= 1000000)] <- "A"
+write.table(
+  length.col,
+  file.path(shiny.dir, "shiny_bar_data_length_colour_10k_01rpbp.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# also get ATACseq peaks counts data, nomalise and merge reps 
+```{r}
+# use code from processing of table into dge object from Nairara's analysis (Diff_accessibility_analysis_new_data.Rmd)
+seqdata= read.table("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Peak_calling/counts_subread_ATAC_enerich_a_MAPQ.txt" , stringsAsFactors = F, header = T)
+
+names_2 <- gsub("X.dawson_genomics.Projects.DNMTi.ATACseq.220215_A01524_0015_BHTTYMDRXY.Processed_files_downsampled.", "", names(seqdata))
+names_3 <- gsub("_merged_rmdup_sort_nMTnU_MAPQ.bam", "", names_2)
+colnames(seqdata) <- names_3
+sampleinfo <- data.frame(sampleID=names_3[7:18], group=c(rep(c("gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm"), 3)), line=c(rep("R1",4),rep("R2",4),rep("R3",4)))
+countdata = seqdata[,c(7:18)]
+rownames(countdata)= paste0(seqdata$Chr, ":", seqdata$Start, "_",seqdata$End)
+genes <- seqdata[,c(1:4)]
+y <-  DGEList (countdata, samples= sampleinfo[, c("sampleID", "group")], group= as.factor(sampleinfo$group), genes=genes)
+y <- y[,y$samples$sampleID!="R1.gNT.0nM_S4",]
+sampleinfo <- sampleinfo[sampleinfo$sampleID!="R1.gNT.0nM_S4",]
+
+# now use TMM norm for dge object
+y <- calcNormFactors(y, method = "TMM")
+
+# multiply read by norm factors, then get mean across replicates and make into shinyCircos compatible table
+y.norm <- y$counts%*%diag(y$samples$norm.factors)
+n0.merge <- rowMeans(y.norm[ , c(4, 8)])
+n100.merge <- rowMeans(y.norm[ , c(1, 5, 9)])
+r0.merge <- rowMeans(y.norm[ , c(2, 6, 10)])
+r100.merge <- rowMeans(y.norm[ , c(3, 7, 11)])
+
+# format and name as req by shinyCircos
+n0.shiny <- cbind(y$genes[,2:4], n0.merge)
+n100.shiny <- cbind(y$genes[,2:4], n100.merge)
+r0.shiny <- cbind(y$genes[,2:4], r0.merge)
+r100.shiny <- cbind(y$genes[,2:4], r100.merge)
+
+colnames(n0.shiny) <- c("chr", "start", "end", "value")
+colnames(n100.shiny) <- c("chr", "start", "end", "value")
+colnames(r0.shiny) <- c("chr", "start", "end", "value")
+colnames(r100.shiny) <- c("chr", "start", "end", "value")
+
+# limit to chromosomes
+n100.shiny <- n100.shiny[n100.shiny$chr %in% chr.names,]
+
+# add colours
+n100.shiny$color <- "A"
+n100.shiny$color[n100.shiny$chr %in% chr.names[seq(1, 24, 2)]] <- "B"
+
+# log peak values as very large
+#n100.shiny$value <- log10(n100.shiny$value)
+
+write.table(
+  n100.shiny,
+  file.path(shiny.dir, "shiny_ATAC_data_peaks_n100.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+```
+
+# make track to show intergenic regions in analysis
+```{r}
+# include all intergenic regions >10k
+shiny.int <- int.counts[, 1:3]
+colnames(shiny.int) <- c("chr", "start", "end")
+
+# remove any regions smaller than 10kbp
+shiny.int <- shiny.int[-which(shiny.int$end - shiny.int$start <= 10000),]
+# add group for rect format
+shiny.int$group <- "A"
+
+# write out
+write.table(
+  shiny.int,
+  file.path(shiny.dir, "shiny_intergenic_rect.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make bed files for editing sites
+```{r}
+bed.dir <- file.path(redi.dir, "bed_files")
+
+for(sample in basename(sample.dirs)){
+  # get table of edits
+  edit.file <- fread(file.path(gw.ann.dir, paste0(sample, "_filter_outTable_GW_ann_bp_res.txt")))
+  # make bed (0-based) with frequency and write out
+  edit.bed <- edit.file[, c(1, 2, 2, 8)]
+  edit.bed[, 2:3] <- edit.bed[, 2:3] -1
+  write.table(
+    edit.bed,
+    file.path(bed.dir, paste0(sample, "_edit_bps_frequency.bed")),
+    sep = "\t",
+    col.names = FALSE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+}
+```
+
+# make bed file of intergenic regions only for use with slamdunk counts
+```{r}
+int.bed <- int.counts[, c(1:3, 6, 5)]
+write.table(
+  int.bed, 
+  file.path(bed.dir, "intergenic_only.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# run slamdunk counts to get TC conversion counts over intergenic regions in above bed file
+```{bash}
+for bam in bams/R*_ngm_filtered.bam
+do
+sbatch scripts/TCcount.sbatch $bam
+done
+
+# not having luck with TCcounts, so trying bam separator to get reads with conversions separately
+for bam in bams/*d7_ngm_filtered.bam
+do
+sbatch scripts/sepBAM.sbatch $bam
+done
+
+for bam in TCbams/*TCReads.bam
+do
+sbatch scripts/intergenic_TCcounts.sbatch $bam
+done
+
+for bam in TCbams/*backgroundReads.bam
+do
+sbatch scripts/intergenic_BGcounts.sbatch $bam
+done
+```
+
+# compile table of TC reads, background, and % edited in table
+```{r}
+n0.edit <- fread(file.path(int.dir, "gNT-0nM-d7_intergenic_TCcounts.txt"))
+colnames(n0.edit) <- c("chr", "start", "end", "name", "strand", "n0.edited.reads")
+r0.edit <- fread(file.path(int.dir, "gRNF4-1-0nM-d7_intergenic_TCcounts.txt"))
+all.reads <- merge(n0.edit, r0.edit, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+n100.edit <- fread(file.path(int.dir, "gNT-100nM-d7_intergenic_TCcounts.txt"))
+all.reads <- merge(all.reads, n100.edit, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+r100.edit <- fread(file.path(int.dir, "gRNF4-1-100nM-d7_intergenic_TCcounts.txt"))
+all.reads <- merge(all.reads, r100.edit, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+colnames(all.reads)[7:9] <- c("r0.edited.reads", "n100.edited.reads", "r100.edited.reads")
+
+n0.un <- fread(file.path(int.dir, "gNT-0nM-d7_intergenic_BGcounts.txt"))
+colnames(n0.un)[6] <- "n0.unedited.reads"
+all.reads <- merge(all.reads, n0.un, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+r0.un <- fread(file.path(int.dir, "gRNF4-1-0nM-d7_intergenic_BGcounts.txt"))
+all.reads <- merge(all.reads, r0.un, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+n100.un <- fread(file.path(int.dir, "gNT-100nM-d7_intergenic_BGcounts.txt"))
+all.reads <- merge(all.reads, n100.un, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+r100.un <- fread(file.path(int.dir, "gRNF4-1-100nM-d7_intergenic_BGcounts.txt"))
+all.reads <- merge(all.reads, r100.un, by.x = c("chr", "start", "end", "name", "strand"), by.y = c("V1", "V2", "V3", "V4", "V5"))
+colnames(all.reads)[11:13] <- c("r0.unedited.reads", "n100.unedited.reads", "r100.unedited.reads")
+all.reads <- all.reads[, c(1:3, 6, 10, 7, 11, 8, 12, 9, 13)]
+
+all.reads$n0.prop.edited <- all.reads$n0.edited.reads/(all.reads$n0.edited.reads + all.reads$n0.unedited.reads)
+all.reads$r0.prop.edited <- all.reads$r0.edited.reads/(all.reads$r0.edited.reads + all.reads$r0.unedited.reads)
+all.reads$n100.prop.edited <- all.reads$n100.edited.reads/(all.reads$n100.edited.reads + all.reads$n100.unedited.reads)
+all.reads$r100.prop.edited <- all.reads$r100.edited.reads/(all.reads$r100.edited.reads + all.reads$r100.unedited.reads)
+all.reads <- all.reads[, c(1:5, 12, 6, 7, 13, 8, 9, 14, 10, 11, 15)]
+write.table(
+  all.reads,
+  file.path(int.dir, "intergenic_prop_edited_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# try rerunning slamdunk filter and then counts per error
+```{bash}
+for bam in bams/*_ngm.bam
+do
+sbatch scripts/filter_TCcount.sbatch $bam
+done
+```
+
+# classify intergenic reads by LINE/SINE/LTR/ALU
+```{r}
+# get repeatmasker file and convert to bed
+repmask <- fread(file.path(bed.dir, "Hg38_RepeatMasker"))
+
+# remove unnecessary columns
+repmask <- repmask[, -c(1:5, 9, 14:17)]
+
+# save as bed
+write.table(
+  repmask,
+  file.path(bed.dir, "Hg38_RepeatMasker.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# intersect each bam with repeatmasker bed
+```{bash}
+for bam in bams/*d7_ngm_filtered.bam
+do
+sbatch scripts/intergenic_RMcounts.sbatch $bam
+done
+```
+
+# collate counts files into single table and add normalised columns
+```{r}
+n0.rm <- fread(file.path(int.dir, "gNT-0nM_intergenic_RMcounts.txt"))
+colnames(n0.rm) <- c("chr", "start", "end", "strand", "repName", "repClass", "repFamily", "gNT_0nM_counts")
+n100.rm <- fread(file.path(int.dir, "gNT-100nM_intergenic_RMcounts.txt"))
+all.counts <- merge(n0.rm, n100.rm, by.x = c("chr", "start", "end", "strand", "repName", "repClass", "repFamily"), by.y = c("V1", "V2", "V3", "V4", "V5", "V6", "V7"))
+r0.rm <- fread(file.path(int.dir, "gRNF4-1-0nM_intergenic_RMcounts.txt"))
+all.counts <- merge(all.counts, r0.rm, by.x = c("chr", "start", "end", "strand", "repName", "repClass", "repFamily"), by.y = c("V1", "V2", "V3", "V4", "V5", "V6", "V7"))
+r100.rm <- fread(file.path(int.dir, "gRNF4-1-100nM_intergenic_RMcounts.txt"))
+all.counts <- merge(all.counts, r100.rm, by.x = c("chr", "start", "end", "strand", "repName", "repClass", "repFamily"), by.y = c("V1", "V2", "V3", "V4", "V5", "V6", "V7"))
+colnames(all.counts)[9:11] <- c("gNT_100nM_counts", "gRNF4_0nM_counts", "gRNF4_100nM_counts")
+
+# add column for RPMs
+all.counts$gNT_0nM_cpms <- all.counts$gNT_0nM_counts/49702346 * 1e6
+all.counts$gNT_100nM_cpms <- all.counts$gNT_100nM_counts/47352219 * 1e6
+all.counts$gRNF4_0nM_cpms <- all.counts$gRNF4_0nM_counts/52867996 * 1e6
+all.counts$gRNF4_100nM_cpms <- all.counts$gRNF4_100nM_counts/48662040 * 1e6
+
+# save full table
+write.table(
+  all.counts,
+  file.path(int.dir, "RepMask_counts_all.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# get LINE/SINE/LTR only
+int.counts <- all.counts[which(all.counts$repClass %in% c("LINE", "SINE", "LTR", "LTR?", "SINE?")), ]
+
+write.table(
+  int.counts,
+  file.path(int.dir, "RepMask_counts_LINE_SINE_LTR.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# also save as bed to use with bedtools intersect 
+write.table(
+  int.counts,
+  file.path(int.dir, "RepMask_counts_LINE_SINE_LTR.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# limit to intergenic regions only (run interactive from REDItools dir)
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -a intergenic/RepMask_counts_LINE_SINE_LTR.bed -b bed_files/intergenic_only.bed -wa > intergenic/RepMask_intonly_counts_LINE_SINE_LTR.bed
+```
+
+# add colnames to bed file above and write as text for Brian
+```{r}
+int.rep <- fread(file.path(int.dir, "RepMask_intonly_counts_LINE_SINE_LTR.bed"))
+colnames(int.rep) <- colnames(int.counts)
+write.table(
+  int.rep,
+  file.path(int.dir, "RepMask_intonly_counts_LINE_SINE_LTR.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# collate edits by intergenic regions, work from table dir
+```{r}
+setwd(gw.ann.dir)
+bps <- list.files(gw.ann.dir, pattern = "d7_filter_outTable_GW_ann_bp_res.txt")
+int.bed <- fread(file.path(bed.dir, "intergenic_only.bed"))
+
+for(bp in bps[1:4]){
+  # get bp res table to work from
+  bp.res <- fread(file.path(gw.ann.dir, bp))
+  # initialise gene table
+  int.edits <- data.frame(matrix(ncol = 8, nrow = 0))
+  # loop through each intergenic region and add entry for table
+  for(int.i in 1:nrow(int.bed)){
+    i.sub <- subset(bp.res, EditChr == int.bed$V1[int.i] & EditPosition >= int.bed$V2[int.i] & EditPosition <= int.bed$V3[int.i] & Frequency >= 0.01)
+    i.entry <- cbind(
+      int.bed$V1[int.i],
+      int.bed$V2[int.i],
+      int.bed$V3[int.i],
+      1 + int.bed$V3[int.i] - int.bed$V2[int.i],
+      sum(round(i.sub$Frequency * i.sub$Coverage_q30)),
+      nrow(i.sub),
+      nrow(i.sub)/(1 + int.bed$V3[int.i] - int.bed$V2[int.i]),
+      mean(i.sub$Frequency)
+    )
+    int.edits <- rbind(int.edits, i.entry)
+  }
+  colnames(int.edits) <- c("Chr", "Start", "End", "RegionLength", "TotalEdits", "NumberEditSites", "EditSites/RegionLength", "MeanFrequencyEdits")
+  
+  write.table(
+    int.edits,
+    file.path(int.dir, gsub("_filter_outTable_GW_ann_bp_res", "_intergenic_edits", bp)),
+    sep = "\t",
+    col.names = TRUE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+}
+```
+
+# this method does not seem to capture the edits that can clearly be seen on IGV, try again with slamdunk pipeline
+# add column to bed file for strand, and duplicate for each strand for TCcounts
+```{r}
+int.bed <- fread(file.path(bed.dir, "intergenic_only.bed"))
+
+int.plus <- int.bed
+int.plus$V6 <- "+" 
+int.minus <- int.bed
+int.minus$V6 <- "-"
+
+int.strands <- rbind(int.plus, int.minus)
+
+write.table(
+  int.strands,
+  file.path(bed.dir, "intergenic_stranded.bed"),
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# alignment needs to be rerun to include RG so that DS tag can be added in filter step
+# all dunks should be rerun after realignment
+```{bash}
+# run from REDItools dir
+for fq in ../fastq/*R1_001.fastq
+do
+sname=`basename $fq _R1_001.fastq`
+sbatch scripts/ngm_align_paired_v043.sbatch $fq ../fastq/${sname}_R2_001.fastq
+done
+```
+
+# Change collapse .csv files to .tsv
+```{bash}
+cd collapse
+mkdir tsv
+for file in *.csv; do cp "$file" tsv/"${file%.csv}.tsv"; done
+```
+
+
+# Read in slam-dunk collapse counts files
+Slamdunk TCcount file format:
+col1 is intergenic region #
+col3 is RPM
+col8 is total count
+col9 is TC count
+
+# Loading and reading in files
+```{r}
+count.dir <- file.path(redi.dir, "SLAMcounts")
+tsv.dir <- file.path(count.dir, "collapse/tsv")
+
+# get a list of all TCcount files
+files <- list.files(tsv.dir)
+# simplify names to use as sample names
+snames <- gsub("_sort_ngmRG_filtered_tcount_collapsed.tsv", "", files)
+
+# make sample annotation 
+sample.info = data.frame(
+  "files" = files, 
+  "samples" = snames, 
+  "replicate" = c(rep(1, 4), rep(2, 4), rep(3, 4)),
+  "group" = rep(c("gNT_0", "gNT_100", "gRNF4_0", "gRNF4_100"), 3)
+  )
+
+# make edger object from TCcounts files, use column 8 for counts and column 9 for TC counts
+counts = readDGE(
+  file = sample.info$files, 
+  path = tsv.dir, 
+  columns = c(1, 8), 
+  group = sample.info$group
+  )
+
+TCcounts = readDGE(
+  file = sample.info$files,
+  path = tsv.dir,
+  columns = c(1, 9), 
+  group = sample.info$group
+  )
+
+# cleaning up names
+rownames(counts$samples) <- snames
+rownames(TCcounts$samples) <- snames
+colnames(counts$counts) <- snames
+colnames(TCcounts$counts) <- snames
+```
+
+# write out raw counts
+```{r}
+write.table(
+  counts$counts, 
+  file.path(int.dir, "intergenic_counts_raw_all.txt"),
+  sep = "\t",
+  quote = FALSE
+  )
+
+write.table(
+  TCcounts$counts, 
+  file.path(int.dir, "intergenic_TCcounts_raw_all.txt"),
+  sep = "\t",
+  quote = FALSE
+  )
+```
+
+# Plot count numbers
+```{r}
+bar.col <- brewer.pal(4, "Set1") 
+plots.dir <- file.path(redi.dir, "plots")
+bar.dir <- file.path(plots.dir, "barplots")
+pdf(file = file.path(bar.dir, "barplots_summary.pdf"), width = 8, height = 4)
+par(mar = c(8, 5, 2, 0.2))
+barplot(
+  colSums(counts$counts), 
+  las = 2, 
+  main = "Total reads", 
+  names.arg = snames,
+  col = bar.col,
+  cex.names = 0.7
+  )
+barplot(
+  colSums(TCcounts$counts), 
+  las = 2, 
+  main = "T>C reads", 
+  names.arg = snames,
+  col = bar.col,
+  cex.names = 0.7
+  )
+barplot(
+  colSums(TCcounts$counts)/colSums(counts$counts)*100, 
+  las = 2, 
+  main = "Percentage T>C", 
+  names.arg = snames,
+  col = bar.col,
+  cex.names = 0.7
+  )
+dev.off()
+```
+
+# MDS plot unnorm counts, make separate plots for IFN and noIFN
+```{r}
+mds.dir <- file.path(plots.dir, "MDS_plots")
+
+# Setting colours, first for no IFN, coloured by conditions
+col.group <- as.factor(counts$samples$group)
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+
+pdf(file.path(mds.dir, "MDS_unnorm_int_counts_group.pdf"))
+MDS = plotMDS(
+  counts,
+  labels = counts$samples$samples, 
+  col = as.vector(col.group),
+  main = "Unnormalised intergenic counts"
+  )
+dev.off()
+
+pdf(file.path(mds.dir, "MDS_unnorm_int_TCcounts_group.pdf"))
+MDS = plotMDS(
+  TCcounts,
+  labels = TCcounts$samples$samples, 
+  col = as.vector(col.group),
+  main = "Unnormalised intergenic T>C counts"
+  )
+dev.off()
+```
+
+# build table of summed replicate counts, edit counts and proportion edited per sample at each int region
+```{r}
+edit.sums <- data.table(
+  "gNT_0_edit_counts" = rowSums(TCcounts$counts[, c(1, 5, 9)]),
+  "gNT_0_all_counts" = rowSums(counts$counts[, c(1, 5, 9)]),
+  "gNT_0_proportion_edited" = rowSums(TCcounts$counts[, c(1, 5, 9)])/rowSums(counts$counts[, c(1, 5, 9)]),
+  "gNT_100_edit_counts" = rowSums(TCcounts$counts[, c(2, 6, 10)]),
+  "gNT_100_all_counts" = rowSums(counts$counts[, c(2, 6, 10)]),
+  "gNT_100_proportion_edited" = rowSums(TCcounts$counts[, c(2, 6, 10)])/rowSums(counts$counts[, c(2, 6, 10)]),
+  "gRNF4_0_edit_counts" = rowSums(TCcounts$counts[, c(3, 7, 11)]),
+  "gRNF4_0_all_counts" = rowSums(counts$counts[, c(3, 7, 11)]),
+  "gRNF4_0_proportion_edited" = rowSums(TCcounts$counts[, c(3, 7, 11)])/rowSums(counts$counts[, c(3, 7, 11)]), 
+  "gRNF4_100_edit_counts" = rowSums(TCcounts$counts[, c(4, 8, 12)]),
+  "gRNF4_100_all_counts" = rowSums(counts$counts[, c(4, 8, 12)]),
+  "gRNF4_100_proportion_edited" = rowSums(TCcounts$counts[, c(4, 8, 12)])/rowSums(counts$counts[, c(4, 8, 12)])
+)
+
+edit.sums$int_names <- rownames(TCcounts$counts)
+
+# intersect with bed file to get coordinates
+edit.table <- merge(int.bed[, 1:4], edit.sums, by.x = "V4", by.y = "int_names")
+colnames(edit.table)[1:4] <- c("int_region", "chr", "start", "end")
+```
+
+# intersect each DNMT peaks file with intergenic regions to get number of peaks per region
+```{bash}
+for peakfile in /dawson_genomics/Projects/DNMTi/ChIPseq/AGRF_CAGRF21056673_H7K2TDSX2/MACS/DNMT*peaks.bed
+do
+sbatch scripts/intergenic_DNMT1peak_counts.sbatch $peakfile
+done
+```
+
+# add peaks counts to full table
+```{r}
+n0.peaks <- fread(file.path(int.dir, "DNMT1_ChIP_gNT_0nm_intergenic_counts.txt"))
+n100.peaks <- fread(file.path(int.dir, "DNMT1_ChIP_gNT_100nm_intergenic_counts.txt"))
+r0.peaks <- fread(file.path(int.dir, "DNMT1_ChIP_gRNF4_0nm_intergenic_counts.txt"))
+r100.peaks <- fread(file.path(int.dir, "DNMT1_ChIP_gRNF4_100nm_intergenic_counts.txt"))
+
+n0.peaks <- n0.peaks[, -5]
+edit.peaks <- merge(n0.peaks, edit.table, by.x = c("V1", "V2", "V3", "V4"), by.y = c("chr", "start", "end", "int_region"))
+colnames(edit.peaks)[1:5] <- c("chr", "start", "end", "int_region", "gNT_0_DNMT1_peak_counts")
+n100.peaks <- n100.peaks[, -5]
+colnames(n100.peaks)[5] <- "gNT_100_DNMT1_peak_counts"
+edit.peaks <- merge(edit.peaks, n100.peaks, by.x = c("chr", "start", "end", "int_region"), by.y = c("V1", "V2", "V3", "V4"))
+r0.peaks <- r0.peaks[, -5]
+colnames(r0.peaks)[5] <- "gRNF4_0_DNMT1_peak_counts"
+edit.peaks <- merge(edit.peaks, r0.peaks, by.x = c("chr", "start", "end", "int_region"), by.y = c("V1", "V2", "V3", "V4"))
+r100.peaks <- r100.peaks[, -5]
+colnames(r100.peaks)[5] <- "gRNF4_100_DNMT1_peak_counts"
+edit.peaks <- merge(edit.peaks, r100.peaks, by.x = c("chr", "start", "end", "int_region"), by.y = c("V1", "V2", "V3", "V4"))
+
+# add columns for length & DNMT peaks/length
+edit.peaks$length <- edit.peaks$end - edit.peaks$start + 1
+edit.peaks$gNT_0_DNMT1_peak_frequency <- edit.peaks$gNT_0_DNMT1_peak_counts/edit.peaks$length
+edit.peaks$gNT_100_DNMT1_peak_frequency <- edit.peaks$gNT_100_DNMT1_peak_counts/edit.peaks$length
+edit.peaks$gRNF4_0_DNMT1_peak_frequency <- edit.peaks$gRNF4_0_DNMT1_peak_counts/edit.peaks$length
+edit.peaks$gRNF4_100_DNMT1_peak_frequency <- edit.peaks$gRNF4_100_DNMT1_peak_counts/edit.peaks$length
+
+# reorder columns
+edit.peaks <- edit.peaks[, c(1:4, 21, 6:8, 5, 22, 9:11, 18, 23, 12:14, 19, 24, 15:17, 20, 25)]
+
+# write out full table
+write.table(
+  edit.peaks,
+  file.path(int.dir, "intergenic_edits_DNMT1_peaks_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# differential analysis for all counts
+# Filtering out counts of regions with low counts
+```{r}
+counts.cpms <- cpm(counts)
+noint <- rownames(counts) %in% c("__no_feature", "__ambiguous", "__too_low_aQual", "__not_aligned", "__alignment_not_unique")
+keep <- rowSums(counts.cpms > 1) >= 2 & !noint
+counts <- counts[keep, ]
+counts.cpms <- counts.cpms[keep, ]
+
+nrow(counts)
+```
+
+# Barplot of library sizes (un-normalised)
+```{r}
+pdf(file.path(plots.dir, "barplots_librarysize.pdf"), width = 6, height = 4)
+barplot(
+  counts$samples$lib.size,
+  names.arg = sample.info$samples,
+  las = 2, 
+  main = "Library sizes (counts)",
+  col = c("coral2", "darkslategray3", "mediumpurple3", "lightgoldenrod2"),
+  cex.names = 0.5
+  )
+dev.off()
+```
+
+# use TMM as normalisation 
+```{r}
+counts.norm <- calcNormFactors(counts, method = "TMM")
+```
+
+# MDS for normalised data
+```{r}
+pdf(file.path(plots.dir, "MDS_norm_counts.pdf"))
+plotMDS(
+  counts.norm,
+  labels = rownames(counts.norm$samples), 
+  main = "TMM normalised counts",
+  col = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
+  )
+dev.off()
+```
+
+# set design and contrasts for DE
+```{r}
+# design table
+design = model.matrix(~0+group, data = counts.norm$samples)
+colnames(design) <- gsub("group", colnames(design), replacement = "")
+design
+
+contr.matrix <- makeContrasts(
+  N100vN0 = gNT_100-gNT_0,
+  R100vR0 = gRNF4_100-gRNF4_0,
+  levels = colnames(design)
+  )
+contr.matrix
+```
+
+# estimate dispersion
+```{r}
+d_counts = estimateDisp(counts.norm, design)
+```
+
+# check out voom analysis first
+```{r}
+v_counts = voom(d_counts, design, plot = T)
+vfit_counts <- lmFit(v_counts, design)
+vfit_counts <- contrasts.fit(vfit_counts, contrasts = contr.matrix)
+efit_counts <- eBayes(vfit_counts)
+pdf(file.path(plots.dir, "SAplot_norm_counts.pdf"))
+plotSA(efit_counts)
+dev.
+```
+
+
+# Summary of contrasts
+```{r}
+summary(decideTests(efit_counts))
+```
+
+# Summary of contrasts with logFC greater than 0.58 (FC 1.5)
+```{r}
+tfit_counts <- treat(vfit_counts, lfc = 0.58)
+dt_counts <- decideTests(tfit_counts)
+summary(dt_counts)
+```
+
+# DE genes
+```{r}
+# initialise list
+contrast.list <- list()
+
+#set and make DE dir
+de.dir <- file.path(results.dir, "DE")
+dir.create(de.dir)
+voom.dir <- file.path(de.dir, "voom")
+dir.create(voom.dir)
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  contrast.list[[contrast.i]] <- topTreat(tfit_counts, coef = contrast.i, n=Inf)
+  contrast.list[[contrast.i]]$int_region <- rownames(contrast.list[[contrast.i]])
+  contrast.list[[contrast.i]] <- merge(int.bed, contrast.list[[contrast.i]],  by.x = "V4", by.y = "int_region")
+  colnames(contrast.list[[contrast.i]])[1:5] <- c("int_region", "chr", "start", "end", "strand")
+  write.table(
+    contrast.list[[contrast.i]],
+    file.path(voom.dir, paste0(colnames(contr.matrix)[[contrast.i]], "_counts_DEtable.txt")),
+    sep = "\t",
+    quote = F,
+    row.names = F,
+    col.names = T
+    )
+}
+
+names(contrast.list) <- colnames(contr.matrix)
+```
+
+# make and save MA plots
+```{r}
+voom.ma.dir <- file.path(plots.dir, "voom_MAplots")
+dir.create(voom.ma.dir)
+for(contrast.i in 1:length(contrast.list)){
+  pdf(file.path(voom.ma.dir, paste0(colnames(tfit_counts)[contrast.i], "_MAplot.pdf")))
+  plotMD(
+    tfit_counts, 
+    column = contrast.i, 
+    status = dt_counts[,contrast.i],
+    main = colnames(tfit_counts)[contrast.i]
+    )
+  dev.off()
+}
+```
+
+# also look at edgeR
+```{r}
+edger.dir <- file.path(de.dir, "edger")
+dir.create(edger.dir)
+
+gfit_counts <- glmQLFit(d_counts, design)
+ftest.list <- list()
+
+for(contrast.i in 1:length(colnames(contr.matrix))){
+
+  ftest.list[[contrast.i]] <- glmQLFTest(gfit_counts, contrast = contr.matrix[ , contrast.i])
+  ftest.list[[contrast.i]]$table$int_region <- rownames(ftest.list[[contrast.i]]$table)
+  ftest.list[[contrast.i]]$table <- merge(int.bed, ftest.list[[contrast.i]]$table, by.x = "V4", by.y = "int_region")
+  colnames(ftest.list[[contrast.i]])[1:5] <- c("int_region", "chr", "start", "end", "strand")
+  # write ftest table
+  write.table(
+    ftest.list[[contrast.i]]$table,
+    file.path(edger.dir, paste0(colnames(contr.matrix)[contrast.i], "_ftest_table.txt")),
+    sep = "\t",
+    quote = F,
+    col.names = T,
+    row.names = F
+  )
+}
+
+# add names for referencing
+names(ftest.list) <- colnames(contr.matrix)
+```
+
+# MA plots
+```{r}
+edger.ma.dir <- file.path(plots.dir, "edger_MAplots")
+dir.create(edger.ma.dir)
+for(contrast.i in 1:length(colnames(contr.matrix))){
+  pdf(file.path(edger.ma.dir, paste0(colnames(contr.matrix)[contrast.i], "_MAplot.pdf")))
+  maPlot(
+    logAbundance = ftest.list[[contrast.i]]$table$logCPM,
+    logFC = ftest.list[[contrast.i]]$table$logFC,
+    main = colnames(contr.matrix)[contrast.i],
+    xlab = expression(bold(paste("log"[2], " CPM"))),
+    ylab = expression(bold(paste("log"[2], " FC"))),
+    col = "black",
+    allCol ="red",
+    lowess = T
+  )
+  dev.off()
+}
+```
+
+
+# additional tracks for circos plot from differential analysis, use edger data
+```{r}
+# make table for shiny circos 
+shiny.exp <- ftest.list$N100vN0$table[, c(2:4, 6)]
+colnames(shiny.exp) <- c("chr", "start", "end", "value")
+
+# remove any regions smaller than 10kbp
+shiny.exp <- shiny.exp[-which(shiny.exp$end - shiny.exp$start <= 10000),]
+
+# save to scratch
+write.table(
+  shiny.exp,
+  file.path(scratch.dir, "shinyCircos/shiny_exp_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make track for sig only (P<0.01) & LFC>2
+shiny.sig.exp <- ftest.list$N100vN0$table[which(ftest.list$N100vN0$table$PValue < 0.01 & abs(ftest.list$N100vN0$table$logFC) >2), c(2:4, 6)]
+colnames(shiny.sig.exp) <- c("chr", "start", "end", "value")
+
+# remove any regions smaller than 10kbp
+shiny.sig.exp <- shiny.sig.exp[-which(shiny.sig.exp$end - shiny.sig.exp$start <= 10000),]
+
+# save to scratch
+write.table(
+  shiny.sig.exp,
+  file.path(scratch.dir, "shinyCircos/shiny_sigonly0_01_exp_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# add another track for relative accessibility
+```{r}
+# get Naiara's differential accessibility results
+ATAC.diff <- fread("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/res_ATAC_complete.csv", drop = 1)
+
+# make table for shiny circos 
+shiny.acc <- ATAC.diff[, c(2:5)]
+colnames(shiny.acc) <- c("chr", "start", "end", "value")
+
+# save to scratch
+write.table(
+  shiny.acc,
+  file.path(scratch.dir, "shinyCircos/shiny_ATAC_diff_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# also make a sig only (FDR< 0.01) track with LFC>2
+shiny.acc.sig <- ATAC.diff[which(ATAC.diff$Treatment_sgNT_FDR < 0.01 & abs(ATAC.diff$Treatment_sgNT_logFC) > 2), c(2:5)]
+colnames(shiny.acc.sig) <- c("chr", "start", "end", "value")
+
+# save to scratch
+write.table(
+  shiny.acc.sig,
+  file.path(scratch.dir, "shinyCircos/shiny_ATAC_diff_sigonly0_01_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# intersect ATAC diff accessibility file with intergenic regions to get relevant peaks
+```{bash}
+# run in scratch shiny dir
+cd /scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/shinyCircos/
+
+module load bedtools/2.27.1
+
+bedtools intersect -a shiny_ATAC_diff_sigonly0_01_data.txt -b /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/Hyper_editing/REDItools/intergenic/intergenic.bed -wa -u > shiny_ATAC_diff_intonly_sigonly0_01_data.txt
+```
+
+# rehead shiny data file
+```{r}
+shiny.acc.sig <- fread(file.path(scratch.dir, "shinyCircos/shiny_ATAC_diff_intonly_sigonly0_01_data.txt"))
+colnames(shiny.acc.sig) <- c("chr", "start", "end", "value")
+
+# save to scratch
+write.table(
+  shiny.acc.sig,
+  file.path(scratch.dir, "shinyCircos/shiny_ATAC_diff_intonly_sigonly0_01_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+
+
+
+# make circos plot of intergenic counts for other samples and save in scratch
+```{r}
+scratch.dir <- "/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting"
+shiny.dir <- file.path(scratch.dir, "shinyCircos")
+
+# get intergenic counts for gNT drug sample
+n0.int.counts <- fread(file.path(redi.dir, "intergenic/gNT-0nM-d7_intergenic_counts.txt"))
+r0.int.counts <- fread(file.path(redi.dir, "intergenic/gRNF4-1-0nM-d7_intergenic_counts.txt"))
+r100.int.counts <- fread(file.path(redi.dir, "intergenic/gRNF4-1-100nM-d7_intergenic_counts.txt"))
+
+# limit to non-promoter intergenic only
+n0.int.counts <- n0.int.counts[n0.int.counts$V10 == "hg38_genes_intergenic", ]
+r0.int.counts <- r0.int.counts[r0.int.counts$V10 == "hg38_genes_intergenic", ]
+r100.int.counts <- r100.int.counts[r100.int.counts$V10 == "hg38_genes_intergenic", ]
+
+# only keep chromosomes
+n0.int.counts <- n0.int.counts[n0.int.counts$V1 %in% chr.names]
+r0.int.counts <- r0.int.counts[r0.int.counts$V1 %in% chr.names]
+r100.int.counts <- r100.int.counts[r100.int.counts$V1 %in% chr.names]
+
+
+
+
+# make table for shiny circos 
+shiny.data <- int.counts[, c(1:3, 11)]
+colnames(shiny.data) <- c("chr", "start", "end", "value")
+
+# remove any regions smaller than 10kbp
+shiny.data <- shiny.data[-which(shiny.data$end - shiny.data$start <= 10000),]
+# remove any regions with fewer than 100 reads
+shiny.data <- shiny.data[-which(shiny.data$value < 100),]
+# add colors
+shiny.data$color <- "A"
+shiny.data$color[shiny.data$chr %in% chr.names[seq(1, 24, 2)]] <- "B"
+write.table(
+  shiny.data,
+  file.path(shiny.dir, "shiny_bar_data.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make logged table for shiny circos 
+shiny.log10 <- shiny.data
+shiny.log10$value <- log10(shiny.log10$value)
+write.table(
+  shiny.log10,
+  file.path(shiny.dir, "shiny_bar_data_log10.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# get reads/length of region to normalise for feature length
+shiny.length <- shiny.data
+shiny.length$value <- shiny.data$value/(shiny.data$end - shiny.data$start)
+# remove any regions with fewer than 0.01 reads/length
+shiny.length <- shiny.length[-which(shiny.length$value < 0.01),]
+write.table(
+  shiny.length,
+  file.path(shiny.dir, "shiny_bar_data_length_10k_01rpbp.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# use different colours for different lengths
+length.col <- shiny.data
+length.col$color <- "C"
+length.col$value <- shiny.data$value/(shiny.data$end - shiny.data$start)
+length.col$color[which((shiny.data$end - shiny.data$start) >= 100000)] <- "B"
+length.col$color[which((shiny.data$end - shiny.data$start) >= 1000000)] <- "A"
+write.table(
+  length.col,
+  file.path(shiny.dir, "shiny_bar_data_length_colour_10k_01rpbp.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# also get ATACseq peaks counts data, nomalise and merge reps 
+```{r}
+# use code from processing of table into dge object from Nairara's analysis (Diff_accessibility_analysis_new_data.Rmd)
+seqdata= read.table("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Peak_calling/counts_subread_ATAC_enerich_a_MAPQ.txt" , stringsAsFactors = F, header = T)
+names_2 <- gsub("X.dawson_genomics.Projects.DNMTi.ATACseq.220215_A01524_0015_BHTTYMDRXY.Processed_files_downsampled.", "", names(seqdata))
+names_3 <- gsub("_merged_rmdup_sort_nMTnU_MAPQ.bam", "", names_2)
+colnames(seqdata) <- names_3
+sampleinfo <- data.frame(sampleID=names_3[7:18], group=c("gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm","gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm","gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm"), line=c(rep("R1",4),rep("R2",4),rep("R3",4)))
+countdata = seqdata[,c(7:18)]
+rownames(countdata)= paste0(seqdata$Chr, ":", seqdata$Start, "_",seqdata$End)
+genes <- seqdata[,c(1:4)]
+y <-  DGEList (countdata, samples= sampleinfo[, c("sampleID", "group")], group= as.factor(sampleinfo$group), genes=genes)
+y <- y[,y$samples$sampleID!="R1.gNT.0nM_S4",]
+sampleinfo <- sampleinfo[sampleinfo$sampleID!="R1.gNT.0nM_S4",]
+
+# now use TMM norm for dge object
+y <- calcNormFactors(y, method = "TMM")
+
+# multiply read by norm factors, then get mean across replicates and make into shinyCircos compatible table
+y.norm <- y$counts%*%diag(y$samples$norm.factors)
+n0.merge <- rowMeans(y.norm[ , c(4, 8)])
+n100.merge <- rowMeans(y.norm[ , c(1, 5, 9)])
+r0.merge <- rowMeans(y.norm[ , c(2, 6, 10)])
+r100.merge <- rowMeans(y.norm[ , c(3, 7, 11)])
+
+# format and name as req by shinyCircos
+n0.shiny <- cbind(y$genes[,2:4], n0.merge)
+n100.shiny <- cbind(y$genes[,2:4], n100.merge)
+r0.shiny <- cbind(y$genes[,2:4], r0.merge)
+r100.shiny <- cbind(y$genes[,2:4], r100.merge)
+
+colnames(n0.shiny) <- c("chr", "start", "end", "value")
+colnames(n100.shiny) <- c("chr", "start", "end", "value")
+colnames(r0.shiny) <- c("chr", "start", "end", "value")
+colnames(r100.shiny) <- c("chr", "start", "end", "value")
+
+# limit to chromosomes
+n100.shiny <- n100.shiny[n100.shiny$chr %in% chr.names,]
+
+# add colours
+n100.shiny$color <- "A"
+n100.shiny$color[n100.shiny$chr %in% chr.names[seq(1, 24, 2)]] <- "B"
+
+# log peak values as very large
+#n100.shiny$value <- log10(n100.shiny$value)
+
+write.table(
+  n100.shiny,
+  file.path(shiny.dir, "shiny_ATAC_data_peaks_n100.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+```
+
+# make track to show intergenic regions in analysis
+```{r}
+# include all intergenic regions >10k
+shiny.int <- int.counts[, 1:3]
+colnames(shiny.int) <- c("chr", "start", "end")
+
+# remove any regions smaller than 10kbp
+shiny.int <- shiny.int[-which(shiny.int$end - shiny.int$start <= 10000),]
+# add group for rect format
+shiny.int$group <- "A"
+
+# write out
+write.table(
+  shiny.int,
+  file.path(shiny.dir, "shiny_intergenic_rect.txt"),
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+
+# intersect RepeatMasker regions with intergenic file to get proportion of each type in intergenic (run interactive)
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -a bed_files/Hg38_RepeatMasker.bed -b bed_files/intergenic_only.bed -wo > intergenic/intergenic_regions_RMcounts.txt
+```
+
+# get proportion of each category by length
+```{r}
+int.rm <- fread(file.path(redi.dir, "intergenic/intergenic_regions_RMcounts.txt"))
+
+int.bp <- sum(int.bed$V3 - int.bed$V2)
+line.sub <- subset(int.rm, V6 == "LINE" | V6 == "LINE?")
+sum(line.sub$V13)/int.bp
+sine.sub <- subset(int.rm, V6 == "SINE" | V6 == "SINE?")
+sum(sine.sub$V13)/int.bp
+ltr.sub <- subset(int.rm, V6 == "LTR" | V6 == "LTR?")
+sum(ltr.sub$V13)/int.bp
+```
+
+# similar intersect as above with RepeatMasker regions and intergenic regions of interest
+```{bash}
+module load bedtools/2.27.1
+
+bedtools intersect -a bed_files/Hg38_RepeatMasker.bed -b bed_files/intergenicROI.bed -wo > intergenic/intergenic_ROI_RMcounts.txt
+```
+
+# get proportion of each category by length
+```{r}
+roi.rm <- fread(file.path(redi.dir, "intergenic/intergenic_ROI_RMcounts.txt"))
+roi.bed <- fread(file.path(bed.dir, "intergenicROI.bed"))
+
+# build table of proportions for each intergenic region of interest
+roi.table <- data.frame(matrix(ncol = 6, nrow = 0))
+for(roi.i in 1:nrow(roi.bed)){
+  roi.sub <- subset(roi.rm, V1 == roi.bed[roi.i]$V1 & V3 >= roi.bed[roi.i]$V2 & V2 <= roi.bed[roi.i]$V3)
+  roi.bp <- roi.bed[roi.i]$V3 - roi.bed[roi.i]$V2
+  line.sub <- subset(roi.sub, V6 == "LINE" | V6 == "LINE?")
+  sine.sub <- subset(roi.sub, V6 == "SINE" | V6 == "SINE?")
+  ltr.sub <- subset(roi.sub, V6 == "LTR" | V6 == "LTR?")
+  roi.row <- c(roi.bed[roi.i]$V1, roi.bed[roi.i]$V2, roi.bed[roi.i]$V3, sum(line.sub$V11)/roi.bp, sum(sine.sub$V11)/roi.bp, sum(ltr.sub$V11)/roi.bp)
+  roi.table <- rbind(roi.table, roi.row)
+}
+colnames(roi.table) <- c("chr", "start", "end", "line_prop", "sine_prop", "ltr_prop")
+# add column for other
+roi.table$other_prop <- 1 - as.numeric(roi.table$line_prop) - as.numeric(roi.table$sine_prop) - as.numeric(roi.table$ltr_prop)
+
+write.table(
+  roi.table,
+  file.path(redi.dir, "intergenic/intergenic_ROI_RM_prop_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# make new ATACseq track for circos, trying to find open chromatin where control is inaccessible
+```{r}
+# Naiara's preferred peaks did not contain peaks of interest so using macs bampe peaks as this set does 
+seqdata= read.table("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Peak_calling/counts_subread_ATAC_bampe_peaks.txt" , stringsAsFactors = F, header = T)
+
+names_2 <- gsub("X.dawson_genomics.Projects.DNMTi.ATACseq.220215_A01524_0015_BHTTYMDRXY.Processed_files_downsampled.", "", names(seqdata))
+#names_3 <- gsub("_merged_rmdup_sort_nMTnU_MAPQ.bam", "", names_2)
+names_3 <- gsub("_merged_rmdup_sort_by_name.bam", "", names_2)
+colnames(seqdata) <- names_3
+sampleinfo <- data.frame(sampleID=names_3[7:18], group=c(rep(c("gNT_0nm", "gNT_100nm", "gRNF4_0nm", "gRNF4_100nm"), 3)), line=c(rep("R1",4),rep("R2",4),rep("R3",4)))
+countdata = seqdata[,c(7:18)]
+rownames(countdata)= paste0(seqdata$Chr, ":", seqdata$Start, "_",seqdata$End)
+genes <- seqdata[,c(1:4)]
+y <-  DGEList (countdata, samples= sampleinfo[, c("sampleID", "group")], group= as.factor(sampleinfo$group), genes=genes)
+y <- y[,y$samples$sampleID!="R1.gNT.0nM_S4",]
+sampleinfo <- sampleinfo[sampleinfo$sampleID!="R1.gNT.0nM_S4",]
+
+# now use TMM norm for dge object
+y <- calcNormFactors(y, method = "TMM")
+
+# multiply read by norm factors, then get mean across replicates 
+y.norm <- y$counts%*%diag(y$samples$norm.factors)
+n0.merge <- rowMeans(y.norm[, c(4, 8)])
+n100.merge <- rowMeans(y.norm[, c(1, 5, 9)])
+r0.merge <- rowMeans(y.norm[, c(2, 6, 10)])
+r100.merge <- rowMeans(y.norm[, c(3, 7, 11)])
+
+# keep only those with little to no reads in control and substantial amount in drug
+keep <- which(n0.merge < 20 & n100.merge/n0.merge > 4 & n100.merge > 50)
+
+# make a table of norm reads at these peaks to send to Brian
+colnames(y.norm) <- colnames(seqdata)[8:18]
+drug.only.peaks <- y.norm[names(keep),]
+drug.only.peaks <- drug.only.peaks[, c(4,8,1,5,9,2,6,10,3,7,11)]
+write.table(
+  drug.only.peaks,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/ATACseq/NT_DNMT1i_only_ATAC_peaks.txt",
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+)
+
+# intersect peaks above with LTRs
+hg38.rm <- fread("REDItools/bed_files/Hg38_RepeatMasker.bed")
+ltrs <- subset(hg38.rm, V6 == "LTR" | V6 == "LTR?")
+# write LTRs only as bed
+write.table(
+  ltrs,
+  "REDItools/bed_files/LTRs_only_RM.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# make drug induced peak table as bed file for intersect
+tab.loc <- strsplit2(rownames(drug.only.peaks), ":")
+tab.pos <- strsplit2(tab.loc[,2], "_")
+drug.peak.bed <- cbind(tab.loc[,1], tab.pos[,1], tab.pos[,2], "*", drug.only.peaks)
+write.table(
+  drug.peak.bed,
+  "REDItools/bed_files/drug_only_peaks.bed",
+  sep = "\t",
+  col.names = FALSE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# intersect bed files (run interactively)
+```{bash}
+cd bed_files
+
+module load bedtools/2.27.1
+
+bedtools intersect -wao -a drug_only_peaks.bed -b LTRs_only_RM.bed > drug_only_peaks_LTRs.bed
+
+# also restrict to intergenic only
+bedtools intersect -wa -u -a drug_only_peaks_LTRs.bed -b intergenic_only.bed > drug_only_peaks_LTRs_int_only.bed
+```
+
+# read in results above, add header and save as text file to sent to brian
+```{r}
+drug.ltr <- fread("REDItools/bed_files/drug_only_peaks_LTRs.bed")
+
+colnames(drug.ltr) <- c("peak.chr", "peak.start", "peak.end", "peak.strand", colnames(drug.peak.bed)[5:15], "LTR.chr", "LTR.start", "LTR.end", "LTR.strand", "rep.name", "rep.class", "rep.family", "bp.overlap")
+
+write.table(
+  drug.ltr,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/ATACseq/NT_DNMT1i_only_ATAC_peaks_LTRs.txt",
+  sep = "\t",
+  row.names = FALSE,
+  col.names = TRUE,
+  quote = FALSE
+)
+
+int.drug.ltr <- fread("REDItools/bed_files/drug_only_peaks_LTRs_int_only.bed")
+
+colnames(int.drug.ltr) <- colnames(drug.ltr)
+
+write.table(
+  drug.ltr,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/ATACseq/NT_DNMT1i_only_ATAC_peaks_LTRs_int_only.txt",
+  sep = "\t",
+  row.names = FALSE,
+  col.names = TRUE,
+  quote = FALSE
+)
+```
+
+
+# make track for circos plot from drug induced atac peaks
+```{r}
+# format and name as req by shinyCircos
+n100.shiny <- cbind(tab.loc[,1], tab.pos[,1], tab.pos[,2], n100.merge[keep])
+
+colnames(n100.shiny) <- c("chr", "start", "end", "value")
+
+write.table(
+  n100.shiny,
+  "/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/shinyCircos/shiny_ATAC_druG_only_peaks_n100.txt",
+  sep = "\t", 
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+```
+
+# make heatmap table with each rep cpms for ERV promoters
+```{r}
+erv.saf <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/ERV_promoter_ROI.saf")
+body.saf <- fread("/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/gene_body_ROI.saf")
+rep.bams <- list.files(file.path(redi.dir, "bams"), pattern = "R*_sort_ngmRG_filtered.bam$", full.names = TRUE)
+
+erv.counts <- featureCounts(
+  rep.bams, 
+  annot.ext = erv.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+body.counts <- featureCounts(
+  rep.bams, 
+  annot.ext = body.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+
+colnames(erv.counts$counts) <- gsub("_sort_ngmRG_filtered.bam", "", colnames(erv.counts$counts))
+colnames(body.counts$counts) <- gsub("_sort_ngmRG_filtered.bam", "", colnames(body.counts$counts))
+```
+
+# Trying with bedtools as well
+```{r}
+erv.bed <- "/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/ERV_promoter_ROI.bed"
+body.bed <- "/scratch/teams/dawson_genomics/Projects/DNMTi/Hyperediting/intergenic/gene_body_ROI.bed"
+
+# loop through each bam to intersect with erv bed and associated gene body bed then collate into counts table for each
+erv.table <- fread(erv.bed)
+body.table <- fread(body.bed)
+for(bam in rep.bams){
+  sname <- gsub("_sort_ngmRG_filtered.bam", "", basename(bam))
+  
+  out.file <- file.path(scratch.dir, "intergenic/bed_files", paste0(sname, "_erv_counts.bed"))
+  system(paste0("module load bedtools/2.27.1 ; bedtools intersect -c -a ", erv.bed, " -b ", bam, " > ", out.file ))
+  rep.bed <- fread(out.file)
+  erv.table <- cbind(erv.table, rep.bed$V4)
+  
+  out.file.body <- file.path(scratch.dir, "intergenic/bed_files", paste0(sname, "_genebody_counts.bed"))
+  system(paste0("module load bedtools/2.27.1 ; bedtools intersect -c -a ", body.bed, " -b ", bam, " > ", out.file.body ))
+  rep.bed.body <- fread(out.file.body)
+  body.table <- cbind(body.table, rep.bed.body$V4)
+}
+
+colnames(erv.table) <- c("chr", "start", "end", gsub("_sort_ngmRG_filtered.bam", "", basename(rep.bams)))
+colnames(body.table) <- c("chr", "start", "end", gsub("_sort_ngmRG_filtered.bam", "", basename(rep.bams)))
+```
+
+# results are the same, normalise by coverage 
+```{r}
+# get bamstats for each bam for normalisation
+stats.file <- file.path(scratch.dir, "intergenic/bam_stats.txt")
+for(bam in rep.bams){
+  system(paste0("module load samtools/1.9 ; echo ", basename(bam), " >> ", stats.file, " ; samtools flagstat ", bam, " >> ", stats.file))
+}
+
+# make vector of coverage from bamstats
+bam.cov <- c(16513681, 14310021, 16656531, 16417407, 15487453, 16230252, 17235048, 14742592, 17701213, 16811946, 18976417, 17502041)
+erv.norm <- as.matrix(erv.table[,4:15]) %*% diag(1000000/bam.cov)
+rownames(erv.norm) <- paste0(erv.table$chr, ":", erv.table$start, "-", erv.table$end)
+colnames(erv.norm) <- colnames(erv.table)[4:15]
+body.norm <- as.matrix(body.table[,4:15]) %*% diag(1000000/bam.cov)
+rownames(body.norm) <- paste0(body.table$chr, ":", body.table$start, "-", body.table$end)
+colnames(body.norm) <- colnames(body.table)[4:15]
+```
+
+
+# make heatmap of counts
+```{r}
+erv.heat <- t(scale(t(erv.norm[, c(1, 5, 9, 3, 7, 11, 2, 6, 10, 4, 8, 12)])))
+
+col_fun = colorRamp2(c(-3, 0, 3), c("blue", "white", "red"))
+pdf(file.path(plots.dir, "Heatmap_ROI_promoter_expression.pdf"))
+Heatmap(erv.heat, name = "z-score(RPM)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun)
+dev.off()
+
+body.heat <- t(scale(t(body.norm[, c(1, 5, 9, 3, 7, 11, 2, 6, 10, 4, 8, 12)])))
+
+col_fun2 = colorRamp2(c(-3, 0, 3), c("purple4", "white", "darkorange2"))
+pdf(file.path(plots.dir, "Heatmap_ROI_genebody_expression.pdf"))
+Heatmap(body.heat, name = "z-score(RPM)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun2)
+dev.off()
+```
+
+# heatmaps as above for ATACseq reads, use featureCounts
+```{r}
+# loop through each bam to intersect with erv bed and associated gene body bed then collate into counts table for each
+atac.bams <- list.files("/dawson_genomics/Projects/DNMTi/ATACseq/220215_A01524_0015_BHTTYMDRXY/Processed_files_downsampled", pattern = "_merged_rmdup_sort_by_name.bam$", full.names = TRUE)
+
+# remake saf with coordinates as geneID to prevent combining of those with identical names
+erv.saf$GeneID <- paste0(erv.saf$Chr, ":", erv.saf$Start, "-", erv.saf$End)
+body.saf$GeneID <- paste0(body.saf$Chr, ":", body.saf$Start, "-", body.saf$End)
+
+erv.atac <- featureCounts(
+  atac.bams, 
+  annot.ext = erv.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+body.atac <- featureCounts(
+  atac.bams, 
+  annot.ext = body.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+
+colnames(erv.atac$counts) <- gsub("_merged_rmdup_sort_by_name.bam", "", colnames(erv.atac$counts))
+colnames(body.atac$counts) <- gsub("_merged_rmdup_sort_by_name.bam", "", colnames(body.atac$counts))
+```
+
+# remove bad sample and normalise
+```{r}
+# remove sample with extremely low reads as in previous analyses 
+erv.atac.mat <- as.matrix(erv.atac$counts[, -1])
+body.atac.mat <- as.matrix(body.atac$counts[, -1])
+
+# use TMM norm factors as above
+erv.atac.norm <- erv.atac.mat %*% diag(y$samples$norm.factors)
+colnames(erv.atac.norm) <- colnames(erv.atac.mat)
+body.atac.norm <- body.atac.mat %*% diag(y$samples$norm.factors)
+colnames(body.atac.norm) <- colnames(body.atac.mat)
+```
+
+
+# make heatmap for ATACseq as above
+```{r}
+erv.atac.heat <- t(scale(t(erv.atac.norm[, c(4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11)])))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("grey20", "white", "maroon4"))
+pdf(file.path(plots.dir, "Heatmap_ROI_promoter_accessibility.pdf"))
+Heatmap(erv.atac.heat, name = "z-score(TMM)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun)
+dev.off()
+
+body.atac.heat <- t(scale(t(body.atac.norm[, c(4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11)])))
+
+col_fun2 = colorRamp2(c(-2, 0, 2), c("chocolate4", "white", "darkgreen"))
+pdf(file.path(plots.dir, "Heatmap_ROI_genebody_accessibility.pdf"))
+Heatmap(body.atac.heat, name = "z-score(TMM)", cluster_columns = FALSE, cluster_rows = FALSE, row_names_gp = gpar(fontsize = 6), column_names_gp = gpar(fontsize = 6), col = col_fun2)
+dev.off()
+```
+
+# get BW files for merged bams from Naiara and for NGM aligned bams for Fig1 heatmaps
+```{bash}
+# from main RNAseq bam dir
+cd /dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/bam
+
+for bam in R1*bam
+do 
+sbatch ../scripts/BamCov.sbatch $bam
+done
+
+# now for ngm aligned, cd to reditools bam dir
+cd ../Hyperediting/Hyper_editing/REDItools/bams/
+
+for bam in g*filtered.bam
+do
+sbatch ../scripts/BamCov.sbatch $bam
+done
+```
+
+# make intergenic stranded bed for regions >10k only, then separate into strands
+```{r}
+int.strand <- fread("bed_files/intergenic_stranded.bed")
+
+int.10k <- int.strand[which(int.strand$V3 - int.strand$V2 >= 10000),]
+
+write.table(int.10k, "bed_files/intergenic_stranded_10kbp.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+
+int.for <- subset(int.10k, V6 == "+")
+int.rev <- subset(int.10k, V6 == "-")
+write.table(int.for, "bed_files/intergenic_stranded_10kbp_forward.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+write.table(int.rev, "bed_files/intergenic_stranded_10kbp_reverse.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+
+# also make unstranded >10k only
+int.only <- fread("bed_files/intergenic_only.bed")
+
+int.only.10k <- int.only[which(int.only$V3 - int.only$V2 >= 10000),]
+
+write.table(int.only.10k, "bed_files/intergenic_only_10kbp.bed", sep = "\t", col.names = F, row.names = F, quote = F)
+```
+
+# get normalised counts for WT DMSO and separate into expression quartiles
+```{r}
+files <- list.files("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/counts/", pattern = "gNT1*-0nM", full.names = TRUE)
+
+wt.dge <- readDGE(files)
+colnames(wt.dge$counts) <- basename(colnames(wt.dge$counts))
+rownames(wt.dge$samples) <- basename(rownames(wt.dge$samples))
+
+# get norm lib sizes
+wt.dge <- calcNormFactors(wt.dge, method="TMM")
+# multiply counts by norm factors
+counts.norm <- wt.dge$counts%*%diag(wt.dge$samples$norm.factors)
+# remove zeros in at least 2 samples
+keep <- rowSums(counts.norm > 0) >= 2
+counts.norm <- counts.norm[keep,]
+wt.mean <- rowMeans(counts.norm)
+
+summary(wt.mean)
+wt.qs <- data.frame("mean" = wt.mean, "quartile" = rep("Q1", length(wt.mean)))
+wt.qs$quartile[which(wt.qs$mean > 3.3 & wt.qs$mean <= 18.4)] <- "Q2"
+wt.qs$quartile[which(wt.qs$mean > 18.4 & wt.qs$mean <= 135.2)] <- "Q3"
+wt.qs$quartile[which(wt.qs$mean > 135.2)] <- "Q4"
+
+# write out quartile table for use with chip data
+write.table(
+  wt.qs,
+  "/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Results/expression_quartiles.txt",
+  sep = "\t",
+  row.names = TRUE, 
+  col.names = NA,
+  quote = FALSE
+  )
+```
+
+# get nearest genes to DNMT1 CGIs from fig1 heatmaps
+```{bash}
+module load bedtools/2.27.1
+
+# files have to be order sorted for closest function
+sort -k1,1 -k2,2n bed_files/DNMT1_CGI_nochr.bed > bed_files/DNMT1_CGI_nochr.sorted.bed
+sort -k1,1 -k2,2n /data/reference/dawson_labs/bed_files/Hg38/Hg38EnsGeneStrandPlusMinus.bed > bed_files/Hg38EnsGeneStrandPlusMinus.sorted.bed
+
+bedtools closest -d -a bed_files/DNMT1_CGI_nochr.sorted.bed -b bed_files/Hg38EnsGeneStrandPlusMinus.sorted.bed > bed_files/DNMT1_CGI_closest_gene.bed
+```
+
+# get stats for closest genes file
+```{r}
+dnmt.cgi.genes <- fread("bed_files/DNMT1_CGI_closest_gene.bed")
+```
+> sum(dnmt.cgi.genes$V10 == 0)
+[1] 29513
+> 29513/32325
+[1] 0.9130085
+> sum(dnmt.cgi.genes$V10 > 0 &dnmt.cgi.genes$V10 <= 2000)
+[1] 1058
+> 1058/32325
+[1] 0.03273009
+> 32325-1025-29513
+[1] 1787
+> 1787/32325
+[1] 0.05528229
+> sum(duplicated(dnmt.cgi.genes$V2))
+[1] 8206
+> sum(duplicated(dnmt.cgi.genes$V7))
+[1] 11827
+
+# due to duplications, it seems best to not use genes and rather stick with same coordinates as other CGI DNMT heatmaps
+```{bash}
+sbatch scripts/DT_CGI_DNMT1peak_heatmap_RNAseq.sbatch
+```
+
+# get DE for gNT drug vs dmso to stratify RRBS heatmap by expression
+```{r}
+gnt.files <- list.files("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/counts", pattern = "gNT1*", full.names = TRUE)
+group <- rep(c("DMSO", "DNMT1i"), 3)
+snames <- gsub("-d7_S[0-9]+.count", "", basename(gnt.files))
+
+gnt.dge <- readDGE(gnt.files, group = group)
+colnames(gnt.dge$counts) <- snames
+rownames(gnt.dge$samples) <- snames
+
+counts.cpms <- cpm(gnt.dge$counts)
+dim(gnt.dge$counts)
+keep <- rowSums(counts.cpms > 1 ) >= 2
+gnt.dge$counts <- gnt.dge$counts[keep,]
+dim(gnt.dge$counts)
+
+# get norm lib sizes
+gnt.dge <- calcNormFactors(gnt.dge, method="TMM")
+#set design and contrasts
+design = model.matrix(~0+group, data = gnt.dge$samples)
+colnames(design) <- gsub("group", "", colnames(design))
+design
+
+contr.matrix <- makeContrasts(
+  gNT_DNMT1ivDMSO = DNMT1i-DMSO,
+  levels = colnames(design)
+  )
+contr.matrix
+
+# estimate disp and fit
+gnt.dge = estimateDisp(gnt.dge, design)
+gfit <- glmQLFit(gnt.dge, design)
+gnt.ftest <- glmQLFTest(gfit, contrast = contr.matrix[ , 1])
+
+# annotate ensg to symbols
+ensg.sym <- fread("/data/reference/dawson_labs/biomart_annotations/Hsapiens/ensembl_hgnc_entrez.txt")
+gnt.ftest$table$ensg <- rownames(gnt.ftest$table)
+gnt.table <- merge(gnt.ftest$table, ensg.sym, by.x = "ensg", by.y = "ensembl_gene_id")
+
+# write table to use with RRBS heatmap
+write.table(
+  gnt.table,
+  file.path(results.dir, "gNT_DNMT1ivDMSO_DE_ftest_table.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# get counts of realignments over genes then repeat elements for violin plots
+```{r}
+# get bam files to count over
+bam.files <- list.files("bams", pattern = "_sort_ngmRG_filtered.bam$", full.names = TRUE)
+
+# make saf of repMask bed and get counts
+rm.bed <- fread("bed_files/Hg38_RepeatMasker.bed")
+rm.saf <- data.frame(
+  "GeneID" = rm.bed$V5,
+  "Chr" = rm.bed$V1,
+  "Start" = rm.bed$V2,
+  "End" = rm.bed$V3,
+  "Strand" = rm.bed$V4
+)
+
+rm.counts <- featureCounts(
+  files = bam.files,
+  annot.ext = rm.saf,
+  useMetaFeatures = FALSE,
+  isPairedEnd = TRUE
+)
+
+# simplify names
+colnames(rm.counts$counts) <- gsub("_sort_ngmRG_filtered.bam", "", colnames(rm.counts$counts))
+
+# make saf of MANE protein coding genes
+mane.bed <- fread("/data/reference/dawson_labs/bed_files/Hg38/Hg38_MANE_ProteinCoding.bed")
+mane.saf <- data.frame(
+  "GeneID" = mane.bed$V4,
+  "Chr" = paste0("chr", mane.bed$V1),
+  "Start" = mane.bed$V2,
+  "End" = mane.bed$V3,
+  "Strand" = mane.bed$V6
+)
+
+mane.counts <- featureCounts(
+  files = bam.files,
+  annot.ext = mane.saf,
+  useMetaFeatures = FALSE,
+  isPairedEnd = TRUE
+)
+
+colnames(mane.counts$counts) <- gsub("_sort_ngmRG_filtered.bam", "", colnames(mane.counts$counts))
+```
+
+# get logCPMs 
+```{r}
+rm.cpms <- cpm(rm.counts$counts, normalized.lib.sizes = FALSE)
+rm.cpms <- log10(rm.cpms)
+
+mane.cpms <- cpm(mane.counts$counts, normalized.lib.sizes = FALSE)
+mane.cpms <- log10(mane.cpms)
+```
+
+# re-make violin plots of expression with adar-aware aligned reads
+```{r}
+# make long format data for ggplots
+rm.cpm.df <- melt(rm.cpms)
+mane.cpm.df <- melt(mane.cpms)
+
+# make group from sample name
+rm.cpm.df$group <- gsub("R[1-3]-", "", gsub("-d7_S[0-9][0-9]?", "", rm.cpm.df$Var2))
+mane.cpm.df$group <- gsub("R[1-3]-", "", gsub("-d7_S[0-9][0-9]?", "", mane.cpm.df$Var2))
+# correct group names to match
+rm.cpm.df$group[which(rm.cpm.df$group == "gNT1-0nM")] <- "gNT-0nM"
+rm.cpm.df$group[which(rm.cpm.df$group == "gNT1-100nM")] <- "gNT-100nM"
+mane.cpm.df$group[which(mane.cpm.df$group == "gNT1-0nM")] <- "gNT-0nM"
+mane.cpm.df$group[which(mane.cpm.df$group == "gNT1-100nM")] <- "gNT-100nM"
+
+# make violins
+pdf(file.path(plots.dir, "violin_RepeatMask_expression.pdf"))
+ggplot(rm.cpm.df, aes(x = group, y = value, fill = group)) +
+  geom_violin() +
+  scale_fill_manual(values = c("black", "gray40", "red3", "salmon")) +
+  labs(y = "log(CPM)")
+dev.off()
+
+pdf(file.path(plots.dir, "violin_MANEproteincoding_expression.pdf"))
+ggplot(mane.cpm.df, aes(x = group, y = value, fill = group)) +
+  geom_violin() +
+  scale_fill_manual(values = c("black", "gray40", "red3", "salmon")) +
+  labs(y = "log(CPM)")
+dev.off()
+```
+
+# get density over first 10k of each mintRNA and find most densely expressed
+```{r}
+# load mint only bed file
+mint.bed <- fread("bed_files/mintRNA_full_coords.bed")
+
+# make saf of first 10k of mints to use w/feature counts
+mint.10k.saf <- data.frame(
+  "GeneID" = paste(mint.bed$V1, mint.bed$V2, mint.bed$V3, sep = "_"),
+  "Chr" = mint.bed$V1,
+  "Start" = ifelse(mint.10k.bed$V6 == "-", mint.10k.bed$V3 - 10000, mint.10k.bed$V2),
+  "End" = ifelse(mint.10k.bed$V6 == "+", mint.10k.bed$V2 + 10000, mint.10k.bed$V3),
+  "Strand" = mint.bed$V6
+)
+
+# get feature counts over each 10k start
+# run on merged bams
+merged.bams <- list.files("bams", pattern = "d7_ngm_filtered.bam$", full.names = TRUE)
+mint.10k.counts <- featureCounts(
+  merged.bams, 
+  annot.ext = mint.10k.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+
+colnames(mint.10k.counts$counts) <- gsub("-d7_ngm_filtered.bam", "", colnames(mint.10k.counts$counts))
+mint.10k.counts$counts
+```
+#                         gNT-0nM gNT-100nM gRNF4-1-0nM gRNF4-1-100nM
+#chr1_107401242_107551195      75       260          92           107
+#chr11_27722467_27924959       10       158          28           100
+#chr13_87442882_87813991       10       398           6           134
+#chr15_70177189_70586832      221      2622         188           809
+#chr15_96486536_96753610      122       191          84            94
+#chr16_77425571_77691241        3       180           2            33
+#chr18_11207199_11434145        0       126           4            32
+#chr2_194534613_195550960      13        41           3            17
+#chr2_21095585_21803108         0        12           0             2
+#chr3_26541772_26720342         6       467           8            82
+#chr4_126363291_126957710       0       171           2            26
+#chr4_153763447_154081109       2        85           1            32
+#chr8_101726702_102200508      13      2763          20           682
+#chr8_19855071_20073952         2       216           0            17
+#chr8_54159564_54408413       339       996         256           718
+#chr8_57461207_57624811       812      8572         953          4505
+#chr9_31845239_32281240         0       156           2            45
+
+# for top mint divide into 500 bp bins and get density per bin
+```{r}
+# top mint already has an annotation over the first 90k which may muddy the results
+# similar story for #2 min, but #3 is really close and doesn't have much annotated
+# so using chr15_70177189_70586832 as the mint for pulldown
+# divide this one into bins and get counts 
+# it is on negative strand so start=end and go -10k for start
+bin.start <- seq(70576832, 70586832, by = 500)
+bin.saf <- data.frame(
+  "GeneID" = paste0("binStart_", bin.start),
+  "Chr" = "chr15",
+  "Start" = bin.start,
+  "End" = bin.start + 499,
+  "Strand" = "-"
+)
+
+# get counts over bins
+bin.counts <- featureCounts(
+  merged.bams, 
+  annot.ext = bin.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = TRUE, 
+  countChimericFragments = FALSE,
+  autosort = TRUE
+  )
+
+colnames(bin.counts$counts) <- gsub("-d7_ngm_filtered.bam", "", colnames(bin.counts$counts))
+
+# remove lst bin which is before the TSS
+bin.counts$counts <- bin.counts$counts[-21, ]
+# write out & send to Jesse
+write.table(
+  bin.counts$counts,
+  file.path("results/mint_500bp_bins_counts_table.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+```
+
+# get # of edited and unedited reads in each mint and make prop plots
+```{r}
+# load mint only bed file
+mint.bed <- fread("/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hyperediting/REDItools/bed_files/mintRNA_full_coords.bed")
+
+# make saf of mints to use w/feature counts
+mint.saf <- data.frame(
+  "GeneID" = paste(mint.bed$V1, mint.bed$V2, mint.bed$V3, sep = "_"),
+  "Chr" = mint.bed$V1,
+  "Start" = mint.bed$V2,
+  "End" = mint.bed$V3,
+  "Strand" = mint.bed$V6
+)
+
+# use separated bams from SLAMdunk
+sep.bams <- list.files(
+  file.path(redi.dir, "TCbams"), 
+  pattern = "Reads.bam$", 
+  full.names = TRUE
+  )
+mint.counts <- featureCounts(
+  sep.bams, 
+  annot.ext = mint.saf, 
+  isPairedEnd = TRUE, 
+  countReadPairs = FALSE, 
+  requireBothEndsMapped = FALSE, 
+  countChimericFragments = TRUE,
+  autosort = TRUE
+  )
+
+colnames(mint.counts$counts) <- c(
+  "gNT_0nM_background", 
+  "gNT_0nM_TC", 
+  "gNT_100nM_background", 
+  "gNT_100nM_TC",
+  "gRNF4_0nM_background", 
+  "gRNF4_0nM_TC", 
+  "gRNF4_100nM_background", 
+  "gRNF4_100nM_TC"
+  )
+mint.counts$counts
+
+# format data for barplot
+mint.bar.data <- data.frame(
+  "condition" = c(rep("gNT-0nM", 2), rep("gNT-100nM", 2), rep("gRNF4-0nM", 2), rep("gRNF4-100nM", 2)),
+  "edits" = rep(c("unedited", "edited"), 4),
+  "counts" = colSums(mint.counts$counts)
+)
+
+# make prop bar plot to show edited vs unedited for mints in each condition
+pdf(file.path(redi.dir, "plots/propBar_mint_editedVnot.pdf"))
+ggplot(mint.bar.data, aes(x = condition, y = counts, fill = edits)) +
+  geom_bar(position = "fill", stat = "identity") +
+  theme_light() +
+  labs(y = "proportion")
+dev.off()
+
+# get prop edited for each mint and make a violin/boxplot/density 
+mint.counts.df <- as.data.frame(mint.counts$counts)
+mint.box.df <- data.frame(
+  "condition" = c(rep("gNT-0nM", 17), rep("gNT-100nM", 17), rep("gRNF4-0nM", 17), rep("gRNF4-100nM", 17)),
+  "prop.edit" = c(
+    mint.counts.df$gNT_0nM_TC/(mint.counts.df$gNT_0nM_background + mint.counts.df$gNT_0nM_TC),
+    mint.counts.df$gNT_100nM_TC/(mint.counts.df$gNT_100nM_background + mint.counts.df$gNT_100nM_TC),
+    mint.counts.df$gRNF4_0nM_TC/(mint.counts.df$gRNF4_0nM_background + mint.counts.df$gRNF4_0nM_TC),
+    mint.counts.df$gRNF4_100nM_TC/(mint.counts.df$gRNF4_100nM_background + mint.counts.df$gRNF4_100nM_TC)
+    )
+)
+
+pdf(file.path(redi.dir, "plots/violin_mint_propEdit.pdf"))
+ggplot(mint.box.df, aes(x = condition, y = prop.edit, fill = condition)) +
+  geom_violin() +
+  scale_fill_manual(values = c("gray40", "black", "salmon", "red3")) +
+  theme_light() +
+  labs(y = "proportion edited")
+dev.off()
+
+pdf(file.path(redi.dir, "plots/boxplot_mint_propEdit.pdf"))
+ggplot(mint.box.df, aes(x = condition, y = prop.edit, fill = condition)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("gray40", "black", "salmon", "red3")) +
+  theme_light() +
+  labs(y = "proportion edited")
+dev.off()
+
+pdf(file.path(redi.dir, "plots/density_mint_propEdit.pdf"))
+ggplot(mint.box.df, aes(color = condition, x = prop.edit, fill = condition)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_manual(values = c("gray40", "black", "salmon", "red3")) +
+  scale_color_manual(values = c("gray40", "black", "salmon", "red3")) +
+  theme_light() +
+  labs(x = "proportion edited")
+dev.off()
+```
+
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(redi.dir, "session-info", paste0(Sys.Date(), "_RNAediting_SLAMDUNK_analysis_2101.txt"))
+)
+```
