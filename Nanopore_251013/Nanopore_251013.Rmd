@@ -1,0 +1,120 @@
+---
+title: "250821_Nanopore"
+author: "Andrea"
+date: "2025-09-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+demultiplexed unmapped bam: 
+  /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/
+project dir: /dawson_genomics/Projects/DNMTi/Nanopore/251013
+
+
+# first need to convert unmapped bams to fastqs in order to process
+```{bash}
+# run from project dir
+cd /dawson_genomics/Projects/DNMTi/Nanopore/251013
+
+# name with sample names (barcode -> sample names provided by MGC):
+sampleID  ID2 ONT barcode
+Nanopore-cDNA-DNMT1i-1  JB4 NBD-24_01
+Nanopore-cDNA-DNMT1i-2  JB5 NBD-24_02
+Nanopore-cDNA-DNMT1i-3  JB6 NBD-24_03
+Nanopore-cDNA-DNMT1i-4  JB7 NBD-24_04
+
+mkdir fastqs 
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/cf1dc885-ef1f-496d-b46f-df0b41f64a61_SQK-NBD114-24_barcode01.bam fastqs/Nanopore-cDNA-DNMT1i-1.fq
+
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/cf1dc885-ef1f-496d-b46f-df0b41f64a61_SQK-NBD114-24_barcode02.bam fastqs/Nanopore-cDNA-DNMT1i-2.fq
+
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/cf1dc885-ef1f-496d-b46f-df0b41f64a61_SQK-NBD114-24_barcode03.bam fastqs/Nanopore-cDNA-DNMT1i-3.fq
+
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/cf1dc885-ef1f-496d-b46f-df0b41f64a61_SQK-NBD114-24_barcode04.bam fastqs/Nanopore-cDNA-DNMT1i-4.fq
+```
+
+# use nf-core pipeline for cDNA, skipping nanoplot as this image has some issue
+# which errors out pipeline 
+# running fastqc on uBAMs separately as these are not compatible w/ pipeline
+```{bash}
+# run from project dir
+cd /dawson_genomics/Projects/DNMTi/Nanopore/251013
+# run fastqc on sample ubams
+mkdir fastqc 
+for bam in /pipeline/Runs/Nanopore/20251013_1601_P2S-02069-A_PBE68526/no_sample_id/basecalling/demultiplexed/cf1dc885-ef1f-496d-b46f-df0b41f64a61_SQK-NBD114-24_barcode0[1-4].bam
+do
+sbatch scripts/fastqc.sbatch $bam
+done
+
+# now run nanoseq pipeline for remainder of processing
+mkdir mkdir nf-core_nanoseq
+
+sbatch scripts/run_nfcore-nanoseq.sbatch
+
+# run multiqc after all of the processes have completed
+module load py-multiqc/1.15-gcc-13.2.0
+multiqc .
+```
+
+# merge replicates
+```{bash}
+# run from project dir 
+cd /dawson_genomics/Projects/DNMTi/Nanopore/251013
+mkdir merged_bams
+  
+sbatch scripts/mergeBam.sbatch \
+  nf-core_nanoseq/minimap2/DNMT1i_R1.sorted.bam \
+  nf-core_nanoseq/minimap2/DNMT1i_R2.sorted.bam \
+  nf-core_nanoseq/minimap2/DNMT1i_R3.sorted.bam \
+  nf-core_nanoseq/minimap2/DNMT1i_R4.sorted.bam \
+  merged_bams/DNMT1i
+  
+# also merge 2 sequencing runs into a single bam
+sbatch scripts/mergeBam.sbatch \
+  merged_bams/DNMT1i.merged.sort.bam \
+  ../250821/merged_bams/DNMT1i.merged.sort.bam \
+  merged_bams/DNMT1i_allRuns
+```
+
+# make bams filtered for quality, unique reads and separated by chr
+```{bash}
+sbatch scripts/filterBam.sbatch merged_bams/DNMT1i_allRuns.merged.sort.bam merged_bams/DNMT1i_allRuns
+```
+
+# make nanoplots for each rep 
+```{bash}
+# run from project dir 
+~/.local/bin/NanoPlot --bam merged_bams/DNMT1i_allRuns.chr8mint.Q10.merged.bam \
+  --plot kde dot \
+  -f pdf \
+  -c darkgreen \
+  -o plots \
+  -p DNMT1i_all_chr8mint_ \
+  --title DNMT1i_all_chr8mint \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --bam merged_bams/DNMT1i_allRuns.chr15mint.Q10.merged.bam \
+  --plot kde dot \
+  -f pdf \
+  -c darkgreen \
+  -o plots \
+  -p DNMT1i_all_ch15mint_ \
+  --title DNMT1i_all_chr15mint \
+  --maxlength 25000
+```
+
+# make heatmap over mints as for other modalities
+```{bash}
+mkdir bigwigs
+mkdir results
+
+# first need to make bigwig of combined bam file
+sbatch scripts/DeeptoolsBamCov.sbatch merged_bams/DNMT1i_allRuns.merged.sort.bam
+
+# then run matrix job
+sbatch scripts/DT_heatmap_mintRNA_50k_500k_nanopore.sbatch
+```
+
+
