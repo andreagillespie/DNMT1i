@@ -1,0 +1,258 @@
+---
+title: "250821_Nanopore"
+author: "Andrea"
+date: "2025-09-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+# FROM MGC:
+Secondary analysis parameters: dorado 1.1.1, super DNA 5.2, NBD barcoding
+
+
+demultiplexed unmapped bam files here: 
+  /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/
+scratch dir: /scratch/teams/dawson_genomics/Projects/DNMTi/Nanopore/250821
+project dir: /dawson_genomics/Projects/DNMTi/Nanopore/250821
+
+
+# first need to convert unmapped bams to fastqs in order to process
+```{bash}
+# run from project dir
+# name with sample names (barcode -> sample names provided by MGC)
+# I’ve provided non-demultiplexed data (no trimming, “72bc35c0.bam” ), as well as demultiplexed (trimmed) with the following barcode assignments:
+Notes SampleName Barcode
+JB1 Nanopore-cDNA-DMSO-1  9
+JB2 Nanopore-cDNA-DMSO-2  10
+JB3 Nanopore-cDNA-DMSO-3  11  
+JB4 Nanopore-cDNA-DNMT1i-1  12
+JB5 Nanopore-cDNA-DNMT1i-2  13
+JB6 Nanopore-cDNA-DNMT1i-3  14
+
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode09.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-1.fq
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode10.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-2.fq
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode11.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-3.fq
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode12.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-1.fq
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode13.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-2.fq
+sbatch scripts/uBAMconversion.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode14.bam /dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-3.fq
+```
+
+# use nf-core pipeline for cDNA, skipping nanoplot as this image has some issue
+# which errors out pipeline 
+# running fastqc on uBAMs separately as these are not compatible w/ pipeline
+```{bash}
+sbatch /dawson_genomics/Projects/DNMTi/Nanopore/250821/scripts/run_nfcore-nanoseq.sbatch
+
+# run fastqc on sample  ubams
+sbatch /dawson_genomics/Projects/DNMTi/Nanopore/250821/scripts/fastqc.sbatch /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode09.bam
+for bam in /pipeline/Runs/Nanopore/20250821_1655_P2S-02069-A_PAY39590/no_sample_id/basecalling/demultiplexed/72bc35c0-4ad0-4b0c-910e-7e3c00af0d93_SQK-NBD114-24_barcode1[0-4].bam
+do
+sbatch /dawson_genomics/Projects/DNMTi/Nanopore/250821/scripts/fastqc.sbatch $bam
+done
+
+# run multiqc after all of the processes have completed
+module load py-multiqc/1.15-gcc-13.2.0
+multiqc .
+```
+
+# merge replicates
+```{bash}
+# run from project dir 
+cd /dawson_genomics/Projects/DNMTi/Nanopore/250821
+
+sbatch /dawson_genomics/Projects/DNMTi/Nanopore/250821/scripts/mergeBam.sbatch \
+  nf-core_nanoseq/minimap2/DMSO_R1.sorted.bam \
+  nf-core_nanoseq/minimap2/DMSO_R2.sorted.bam \
+  nf-core_nanoseq/minimap2/DMSO_R3.sorted.bam \
+  merged_bams/DMSO
+  
+sbatch /dawson_genomics/Projects/DNMTi/Nanopore/250821/scripts/mergeBam.sbatch \
+  nf-core_nanoseq/minimap2/DNMT1i_R1.sorted.bam \
+  nf-core_nanoseq/minimap2/DNMT1i_R2.sorted.bam \
+  nf-core_nanoseq/minimap2/DNMT1i_R3.sorted.bam \
+  merged_bams/DNMT1i
+```
+
+# make a violin of read lengths over selected mintRNAs 
+# first get beds only over each mint, for each rep
+```{bash}
+# run interactively
+module load bedtools2/2.31.1-gcc-13.2.0
+
+# first for chr 8 example mint
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R1.bed12 > \
+  bed_files/DMSO_R1_chr8mint.bed
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R2.bed12 > \
+  bed_files/DMSO_R2_chr8mint.bed
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R3.bed12 > \
+  bed_files/DMSO_R3_chr8mint.bed
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R1.bed12 > \
+  bed_files/DNMT1i_R1_chr8mint.bed
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R2.bed12 > \
+  bed_files/DNMT1i_R2_chr8mint.bed
+bedtools intersect -wb -a bed_files/chr8_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R3.bed12 > \
+  bed_files/DNMT1i_R3_chr8mint.bed
+  
+# now for chr15 exmaple mint
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R1.bed12 > \
+  bed_files/DMSO_R1_chr15mint.bed
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R2.bed12 > \
+  bed_files/DMSO_R2_chr15mint.bed
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DMSO_R3.bed12 > \
+  bed_files/DMSO_R3_chr15mint.bed
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R1.bed12 > \
+  bed_files/DNMT1i_R1_chr15mint.bed
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R2.bed12 > \
+  bed_files/DNMT1i_R2_chr15mint.bed
+bedtools intersect -wb -a bed_files/chr15_mint.bed \
+  -b nf-core_nanoseq/minimap2/bigbed/DNMT1i_R3.bed12 > \
+  bed_files/DNMT1i_R3_chr15mint.bed
+```
+
+# Load R libraries and set paths
+```{r}
+library(data.table)
+library(ggplot2)
+
+project.dir <- "/dawson_genomics/Projects/DNMTi/Nanopore/250821"
+```
+
+# loop through bed files and build data table for plots
+```{r}
+bed.files <- list.files(
+  file.path(project.dir, "bed_files"), 
+  pattern = "[58]mint.bed",
+  full.names = TRUE
+  )
+
+length.table <- data.frame()
+for(bed.file in bed.files){
+  bed <- fread(bed.file)
+  bed.data <- data.frame(
+    "length" = bed$V3 - bed$V2,
+    "chr" = bed$V1,
+    "sample" = gsub("_chr[0-9][0-9]?mint.bed", "", basename(bed.file)),
+    "treatment" = gsub("_R[1-3]_chr[0-9][0-9]?mint.bed", "", basename(bed.file))
+  )
+  length.table <- rbind(length.table, bed.data)
+}
+length.table$chr_samp <- paste(length.table$chr, length.table$sample, sep = "_")
+
+# lengths should be logged for visualisation
+length.table$log_length <- log10(length.table$length)
+```
+
+# make plot of read lengths
+```{r}
+pdf(file.path(project.dir, "plots/box_dotplot_refSpan_mintRNAs.pdf"))
+ggplot(length.table, aes(x = chr_samp, y = log_length)) +
+  geom_boxplot(aes(colour = treatment)) +
+  geom_jitter(aes(colour = treatment), alpha = 0.25) +
+  theme_minimal() +
+  scale_color_manual(values = c("darkgreen", "royalblue4")) +
+  xlab("") +
+  ggtitle("Reference span of Nanopore reads over mintRNAs") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ylab("Reference span log10(bp)") 
+dev.off()
+
+pdf(file.path(project.dir, "plots/violin_dotplot_refSpan_mintRNAs.pdf"))
+ggplot(length.table, aes(x = chr_samp, y = log_length)) +
+  geom_violin(aes(colour = treatment)) +
+  geom_jitter(aes(colour = treatment), alpha = 0.25) +
+  theme_minimal() +
+  scale_color_manual(values = c("darkgreen", "royalblue4")) +
+  xlab("") +
+  ggtitle("Reference span of Nanopore reads over mintRNAs") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ylab("Reference span log10(bp)") 
+dev.off()
+```
+
+# make nanoplots for each rep 
+```{bash}
+# run from project dir 
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DMSO-1.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c darkgreen \
+  -o plots \
+  -p DMSO-1_ \
+  --title DMSO-1 \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DMSO-2.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c darkgreen \
+  -o plots \
+  -p DMSO-2_ \
+  --title DMSO-2 \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DMSO-3.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c darkgreen \
+  -o plots \
+  -p DMSO-3_ \
+  --title DMSO-3 \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DNMT1i-1.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c royalblue \
+  -o plots \
+  -p DNMT1i-1_ \
+  --title DNMT1i-1 \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DNMT1i-2.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c royalblue \
+  -o plots \
+  -p DNMT1i-2_ \
+  --title DNMT1i-2 \
+  --maxlength 25000
+  
+~/.local/bin/NanoPlot --fastq fastqs/Nanopore-cDNA-DNMT1i-3.fq.gz \
+  --plot kde dot \
+  -f pdf \
+  -c royalblue \
+  -o plots \
+  -p DNMT1i-3_ \
+  --title DNMT1i-3 \
+  --maxlength 25000
+```
+
+# make filtered mint only bams for these merged bam (as for following exp)
+```{bash}
+sbatch ../251013/scripts/filterBam.sbatch merged_bams/DMSO.merged.sort.bam merged_bams/DMSO
+sbatch ../251013/scripts/filterBam.sbatch merged_bams/DNMT1i.merged.sort.bam merged_bams/DNMT1i
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_Nanopore_250821.txt"))
+)
+```
