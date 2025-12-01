@@ -16,9 +16,9 @@ module load picard/2.6.0
 
 bname=`basename $1 _Aligned.out.bam`
 
-#samtools sort -o STAR_bams/${bname}_sort.bam $1
+samtools sort -o STAR_bams/${bname}_sort.bam $1
 
-#samtools index STAR_bams/${bname}_sort.bam
+samtools index STAR_bams/${bname}_sort.bam
 
 ### dedup killed for not enough mem, up mem allocation and rerun
 java -Xmx8g -jar /config/binaries/picard/2.23.8/picard.jar MarkDuplicates I=STAR_bams/${bname}_sort.bam O=STAR_bams/${bname}_dedup.bam M=STAR_bams/${bname}_dedup.txt REMOVE_DUPLICATES=true
