@@ -1,0 +1,366 @@
+---
+title: "RNAseq_230214"
+author: "Andrea"
+date: '2023-03-01'
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+
+Project directory: /scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/230421_NB501056_0950_AHKFKVBGXT
+
+fastq dir: /pipeline/Runs/NextSeq/230421_NB501056_0950_AHKFKVBGXT/ProjectFolders/Project_Brian-Liddicoat/Sample_*/
+
+# load libraries
+```{r, eval=TRUE}
+library(data.table)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(edgeR)
+```
+
+
+```{bash}
+mkdir fastqc
+mkdir scripts
+mkdir logs
+
+for fq in /pipeline/Runs/NextSeq/230421_NB501056_0950_AHKFKVBGXT/ProjectFolders/Project_Brian-Liddicoat/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/fastqc.sbatch $fq 
+done
+
+# when fastqc is finished run multiqc 
+module load multiqc/1.8
+cd fastqc
+multiqc .
+cd ..
+```
+
+# set up dirs
+```{r}
+project.dir <- "/scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/230421_NB501056_0950_AHKFKVBGXT"
+counts.dir <- file.path(project.dir, "counts")
+session.dir <- file.path(project.dir, "session-info")
+bam.dir <- file.path(project.dir, "bams")
+
+dir.create(session.dir)
+```
+
+# align using ngm slam-seq settings as done for previous RNAseq
+```{bash}
+# run from project dir
+for fq in /pipeline/Runs/NextSeq/230421_NB501056_0950_AHKFKVBGXT/ProjectFolders/Project_Brian-Liddicoat/Sample_*/*_R1_001.fastq.gz
+do
+sbatch scripts/ngm_align_paired_v043.sbatch $fq 
+done
+
+cd trimmed_fastqs
+multiqc .
+cd ..
+```
+
+# make TDFs
+```{bash}
+for bam in bams/*_sort_ngmRG_filtered_dedup.bam
+do
+sbatch scripts/toTDF.sbatch $bam
+done
+```
+
+# use htseq for counts
+```{bash}
+for bam in bams/*_sort_ngmRG_filtered_dedup.bam
+do
+sbatch scripts/htseq_count.sbatch $bam
+done
+```
+
+# above files will be used to examine intergenic regions for this experiment, primary analysis for heatmaps below
+
+
+##### primary analysis #####
+# re-align with STAR to match previous RNAseq analysis, get counts and tdfs also
+```{bash}
+for fq in trimmed_fastqs/*_R1_001_trimmed.fq.gz
+do
+sbatch scripts/align_star.sbatch $fq 
+done
+
+for bam in STAR_bams/*_Aligned.out.bam
+do
+sbatch scripts/STAR_dedup_filter_TDF.sbatch $bam
+done
+
+for bam in STAR_bams/*_dedup_sort.bam
+do
+sbatch scripts/STAR_htseq_count.sbatch $bam 
+done
+```
+
+# load into edger and get norm counts for heatmap
+```{r}
+star.counts <- file.path(project.dir, "STAR_counts")
+star.results <- file.path(project.dir, "STAR_results")
+
+# get a list of all TCcount files
+files <- list.files(star.counts)
+# simplify names to use as sample names
+snames <- gsub("DNMT1i-RNA-MV411-dC9-", "", gsub(".count", "", files))
+
+# make sample annotation 
+sample.ann <- data.frame(
+  "files" = files, 
+  "samples" = snames, 
+  "cells" = c("4KD", "4KD", "4NT", "4KD", "4KD", "4NT", "4NT"),
+  "treatment" = c(rep("DMSO", 3), rep("DNMTi", 4)),
+  "replicate" = c("R2", "R3", "R2", "R2", "R3", "R2", "R3")
+  )
+sample.ann$group <- paste(sample.ann$cells, sample.ann$treatment, sep = "_")
+
+dge.counts = readDGE(
+  file = sample.ann$files, 
+  path = star.counts,
+  group = sample.ann$group
+  )
+
+# write out raw counts
+write.table(
+  dge.counts$counts,
+  file.path(star.results, "4KD_raw_counts.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+  )
+
+# Filtering out genes with low counts & not useful
+noint <- rownames(dge.counts$counts) %in% c("__no_feature", "__ambiguous", "__too_low_aQual", "__not_aligned", "__alignment_not_unique")
+table(noint)
+counts.cpms <- cpm(dge.counts$counts)
+keep <- rowSums(counts.cpms > 1 ) >= 1 & !noint
+dim(dge.counts$counts)
+dge.counts$counts <- dge.counts$counts[keep,]
+dim(dge.counts$counts)
+```
+> dim(dge.counts$counts)
+[1] 43392     7
+> dge.counts$counts <- dge.counts$counts[keep,]
+> dim(dge.counts$counts)
+[1] 15427     7
+
+# calc TMM norm and write out file
+```{r}
+dge.counts <- calcNormFactors(dge.counts, method = "TMM")
+
+# multiply counts by norm factors
+counts.norm <- as.data.frame(dge.counts$counts%*%diag(dge.counts$samples$norm.factors))
+colnames(counts.norm) <- snames
+write.table(
+  counts.norm,
+  file.path(star.results, "4KD_TMMnorm_counts.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+  )
+```
+
+# combine replicates from separate experiments, normalise and batch correct
+```{r}
+# get raw counts matrices from each experiment and combine into single matrix
+pilot.mat <- read.table("/scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/221222_NB501056_0901_AHT5VYBGXN/STAR_results/4KD_raw_counts.txt")
+original.mat <- read.table("/scratch/teams/dawson_genomics/Projects/DNMTi/RNAseq/230214_NB501056_0923_AH3JFCBGXT/STAR_results/4KD_raw_counts.txt")
+repeat.mat <- read.table(file.path(star.results, "4KD_raw_counts.txt"))
+# limit original experiment to rep1
+original.mat <- original.mat[, grepl(".R1_", colnames(original.mat))]
+
+# try combining all 3 to see if we can remove batch effects
+comb.mat <- cbind(pilot.mat, original.mat, repeat.mat)
+
+# simplify colnames
+colnames(comb.mat) <- gsub("DNMT1i.RNA.MV411.", "", colnames(comb.mat))
+
+# write out combined raw counts matrix
+write.table(
+  comb.mat,
+  file.path(star.results, "4KD_combined_raw_counts.txt"),
+  sep = "\t",
+  row.names = TRUE,
+  col.names = NA,
+  quote = FALSE
+  )
+
+# make a combined annotation and include batch info
+comb.ann <- data.frame(
+  "samples" = colnames(comb.mat), 
+  "cells" = c("4KD", "4KD", "4NT", "4NT", "4KD", "4NT", "4KD", "4NT", "4KD", "4KD", "4NT", "4KD", "4KD", "4NT", "4NT"),
+  "treatment" = c(rep(c("DMSO", "DNMTi"), 2), rep("DMSO", 2), rep("DNMTi", 2), rep("DMSO", 3), rep("DNMTi", 4)),
+  "replicate" = c(rep("R0", 4), rep("R1", 4), "R2", "R3", "R2", "R2", "R3", "R2", "R3"),
+  "batch" = c(rep("pilot", 4), rep("original", 4), rep("repeat", 7))
+  )
+comb.ann$group <- paste(comb.ann$cells, comb.ann$treatment, sep = "_")
+
+
+# read into edger and normalise
+dge.counts <- DGEList(
+  comb.mat,
+  group = comb.ann$group
+  )
+
+dge.counts <- calcNormFactors(dge.counts, method = 'TMM')
+dge.cpm <- cpm(dge.counts, normalized.lib.sizes = TRUE)
+
+# filter out low counts
+keep <- rowSums(dge.cpm > 1 ) >= 2
+dim(dge.counts$counts)
+dge.counts$counts <- dge.counts$counts[keep,]
+dim(dge.counts$counts)
+```
+> dim(dge.counts$counts)
+[1] 43392    15
+> dge.counts$counts <- dge.counts$counts[keep,]
+> dim(dge.counts$counts)
+[1] 14925    15
+
+# write out norm filtered counts
+```{r}
+# multiply counts by norm factors
+counts.norm <- as.data.frame(dge.counts$counts%*%diag(dge.counts$samples$norm.factors))
+colnames(counts.norm) <- colnames(dge.counts$counts)
+write.table(
+  counts.norm,
+  file.path(star.results, "4KD_combined_TMMnorm_counts.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+```
+
+# get IFN response genes MSigDB pathway (same as Naiara used) to make heatmap in 4KD samples
+```{r}
+# get MSigDB rds from Naiara's dir
+Hs_H.all <- readRDS(file="/dawson_genomics/Projects/DNMTi/RNAseq/210108_NB501056_0582_AHMHNFAFX2/Hs.h.all.v7.1.entrez.rds")
+
+# get IFN genes, this uses entrez IDs
+ifn.entrez <- Hs_H.all[["HALLMARK_INTERFERON_GAMMA_RESPONSE"]]
+
+# annotate entrez ids on to norm counts
+entrez.sym <- fread("/data/reference/dawson_labs/biomart_annotations/Hsapiens/ensembl_hgnc_entrez.txt")
+counts.norm$hgnc <- rownames(counts.norm)
+counts.norm <- merge(counts.norm, entrez.sym, by.x = "hgnc", by.y = "hgnc_symbol")
+
+# limit to ifn genes for hm, and format appropriately
+hm.counts <- counts.norm[which(counts.norm$entrezgene_id %in% ifn.entrez),]
+hm.counts <- hm.counts[-which(duplicated(hm.counts$hgnc)),]
+hm.mat <- as.matrix(log10(hm.counts[, 2:16]))
+rownames(hm.mat) <- hm.counts$hgnc
+# change -INF values (where initial value was 0) to 0
+hm.mat[is.infinite(hm.mat)] <- 0
+# reorder columns
+hm.mat <- hm.mat[,c(3, 6, 11, 4, 8, 14, 15, 1, 5, 9, 10, 2, 7, 12, 13)]
+
+col_fun = rev(brewer.pal(11, name = "Spectral"))
+pdf(file.path(project.dir, "STAR_plots/Heatmap_TMMnorm_LOGexpression_MSigDB_IFN_genes.pdf"))
+Heatmap(hm.mat, cluster_rows = TRUE, cluster_columns = FALSE, show_row_names = TRUE, use_raster = FALSE, col = col_fun, row_names_gp = gpar(fontsize = 3), column_names_gp = gpar(fontsize = 6), name = "log10(TMM)")
+dev.off()
+
+# remove poorly sequences samples and zscore heatmap
+zhm.mat <- t(scale(t(hm.mat)))
+pdf(file.path(project.dir, "STAR_plots/Heatmap_zscore_LOGexpression_MSigDB_IFN_genes.pdf"))
+Heatmap(zhm.mat, cluster_rows = TRUE, cluster_columns = FALSE, show_row_names = TRUE, use_raster = FALSE, col = col_fun, row_names_gp = gpar(fontsize = 3), column_names_gp = gpar(fontsize = 6), name = "z-score(TMM)")
+dev.off()
+```
+
+# batch correct and write out
+```{r}
+# get log cpms for batch correction
+dge.cpm.log <- cpm(dge.counts, normalized.lib.sizes = TRUE, log = TRUE)
+
+batch.cor.counts.norm <- removeBatchEffect(
+	dge.cpm.log, 
+	batch = comb.ann$batch
+	)
+
+# write out batch corrected normalised counts
+write.table(
+  batch.cor.counts.norm,
+  file.path(star.results, "4KD_combined_batchcorrected_TMMnorm_counts.txt"),
+  sep = "\t",
+  col.names = NA,
+  row.names = TRUE,
+  quote = FALSE
+)
+```
+
+# make heatmaps with batch cor data
+```{r}
+batch.cor.counts.norm <- as.data.frame(batch.cor.counts.norm)
+batch.cor.counts.norm$hgnc <- rownames(batch.cor.counts.norm)
+batch.cor.counts.norm <- merge(batch.cor.counts.norm, entrez.sym, by.x = "hgnc", by.y = "hgnc_symbol")
+
+# limit to ifn genes for hm, and format appropriately
+hm.counts <- batch.cor.counts.norm[which(batch.cor.counts.norm$entrezgene_id %in% ifn.entrez),]
+hm.counts <- hm.counts[-which(duplicated(hm.counts$hgnc)),]
+hm.mat <- as.matrix(hm.counts[, 2:16])
+rownames(hm.mat) <- hm.counts$hgnc
+# change -INF values (where initial value was 0) to 0
+hm.mat[is.infinite(hm.mat)] <- 0
+# reorder columns
+hm.mat <- hm.mat[,c(3, 6, 11, 4, 8, 14, 15, 1, 5, 9, 10, 2, 7, 12, 13)]
+
+pdf(file.path(project.dir, "STAR_plots/Heatmap_logCPM_batchcorrected_TMMnorm_MSigDB_IFN_genes.pdf"))
+Heatmap(hm.mat, cluster_rows = TRUE, cluster_columns = FALSE, show_row_names = TRUE, use_raster = FALSE, col = col_fun, row_names_gp = gpar(fontsize = 3), column_names_gp = gpar(fontsize = 6), name = "log2(CPM)")
+dev.off()
+
+# remove poorly sequences samples and zscore heatmap
+zhm.mat <- t(scale(t(hm.mat)))
+pdf(file.path(project.dir, "STAR_plots/Heatmap_zscore_batchcorrected_TMMnorm_MSigDB_IFN_genes.pdf"))
+Heatmap(zhm.mat, cluster_rows = TRUE, cluster_columns = FALSE, show_row_names = TRUE, use_raster = FALSE, col = col_fun, row_names_gp = gpar(fontsize = 3), column_names_gp = gpar(fontsize = 6), name = "z-score(TMM)")
+dev.off()
+```
+
+# batch correction did better than expected, but batch effects are still apparent
+# make mds plots of batch corrected combined data to examine
+```{r}
+# first color by group
+col.group <- as.factor(dge.counts$samples$group[c(3, 6, 11, 4, 8, 14, 15, 1, 5, 9, 10, 2, 7, 12, 13)])
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+
+pdf(file.path(project.dir, "STAR_plots/MDS_group_logCPM_batchcorrected_TMMnorm.pdf"))
+MDS = plotMDS(
+  hm.mat,
+  labels = colnames(hm.mat), 
+  col = as.vector(col.group),
+  main = "TMMnorm batch-corrected logCPM"
+  )
+dev.off()
+
+# now color by batch
+col.group <- as.factor(comb.ann$batch[c(3, 6, 11, 4, 8, 14, 15, 1, 5, 9, 10, 2, 7, 12, 13)])
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1") 
+
+pdf(file.path(project.dir, "STAR_plots/MDS_batch_logCPM_batchcorrected_TMMnorm.pdf"))
+MDS = plotMDS(
+  hm.mat,
+  labels = colnames(hm.mat), 
+  col = as.vector(col.group),
+  main = "TMMnorm batch-corrected logCPM"
+  )
+dev.off()
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(session.dir, paste0(Sys.Date(), "_RNAseq_230421.txt"))
+)
+```
