@@ -1,0 +1,7 @@
+group,replicate,barcode,input_file,fasta,gtf
+DMSO,1,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-1.fq.gz,hg38,
+DMSO,2,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-2.fq.gz,hg38,
+DMSO,3,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DMSO-3.fq.gz,hg38,
+DNMT1i,1,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-1.fq.gz,hg38,
+DNMT1i,2,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-2.fq.gz,hg38,
+DNMT1i,3,,/dawson_genomics/Projects/DNMTi/Nanopore/250821/fastqs/Nanopore-cDNA-DNMT1i-3.fq.gz,hg38,
