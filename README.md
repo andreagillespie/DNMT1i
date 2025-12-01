@@ -34,3 +34,5 @@ RNAseq_230105: Repeat of previous experiment w/ separate fractions for cytoplasm
 RNAseq_230214: These are dC9-4NT & -4KD +/- drug, n=3 aligned with STAR as standard original RNAseq and ngm ADAR-aware alignment.
 
 RNAseq_230421: Due to some sequencing issues in MGC several of the samples from the previous run had to be resequenced in this run.
+
+RRBS: Data originally processed and analysed by CL & NGB, the scripts here are for downstream analysis of this data over DNMT1 peaks. 
