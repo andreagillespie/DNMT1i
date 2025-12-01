@@ -20,3 +20,7 @@ ExternalData_GSE145639: These scripts analyse raw data (and subsequent analysis)
 ExternalData_GSE209777: These scripts are analyzing raw data downloaded from GEO for RNAseq published in the TINPAT paper in Nat Com Oct 2023 https://www.nature.com/articles/s41467-023-42417-w
 
 MassSpec: This experiment was conducted and data processed externally; these scripts are just doing downstream analysis on provided tables.
+
+Nanopore_250821: Initial nanopore sequencing n=3 for just WT-DMSO & -DNMT1i conditions.
+
+Nanopore_251013: Top up nanopore sequencing of just WT-DNMT1i condition, n=4.
