@@ -24,3 +24,6 @@ MassSpec: This experiment was conducted and data processed externally; these scr
 Nanopore_250821: Initial nanopore sequencing n=3 for just WT-DMSO & -DNMT1i conditions.
 
 Nanopore_251013: Top up nanopore sequencing of just WT-DNMT1i condition, n=4.
+
+RNAseq_210108: Original RNAseq performed in 4 conditions w/ n=3, initially processed and analysed by EYNL & NGB. My analysis consisted of re-aligning and processing the data with an editing-aware alignment to account for ADAR editing of reads particularly in intergenic regions and mintRNAs.
+
